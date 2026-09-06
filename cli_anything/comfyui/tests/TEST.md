@@ -79,6 +79,28 @@ The lines the first two rounds left dark, each of which is a real canvas shape:
 - `run` with a rejected graph exits 1 on stderr and records NO prompt id
 - `workflow validate` on an invalid graph exits 1, naming the problems
 
+### refine round 13 — the last dark branches
+
+Eleven partial branches were the only coverage left in the harness (99.4% line,
+100% statement). Each is a real behaviour, now pinned:
+
+- `workflow convert` with **neither `-o` nor a load**: no file written, the
+  human output says nothing about writing, and `--no-load` leaves the session
+  file uncreated
+- `workflow set --raw` keeps `"true"` a string instead of coercing a boolean
+- `workflow validate` on a **complete** graph exits 0 and says "valid" (only
+  the failing path was tested before)
+- `link_map` skips junk link rows — a short positional row, a dict without
+  `id`, a bare string, a `None` — without wedging
+- a bypassed/reroute node passes its **first wired** input through, skipping
+  inputs whose link id is dangling or null on the way
+- a schema widget **also wired over a link**: the wire wins, and the positional
+  cursor still advances past it AND its `control_after_generate` companion, so
+  later widgets do not land one slot off
+- `upload_mask` accepts an `original_ref` already given as the dict the server
+  wants, and omits the `type` form field when `kind` is None
+- `userdata_put` sends raw bytes to the wire exactly as given, un-JSON-ed
+
 ### `core/session.py`
 
 - round-trip save/load; `_path` survives
@@ -443,3 +465,19 @@ attaches a filename that lands in the PNG metadata).
 - 2 new live-server E2E tests (not part of the CI gate): history prune-then-
   wipe against a real render, and an overwrite-refused upload.
 - 170 unit tests, all passing. The live-server E2E suite is unchanged in kind.
+
+## 2026-09-06 — the last dark branches
+
+No new commands, no CLI behaviour change. The gap found this pass was coverage
+honesty: 11 partially-covered branches — paths the code guards against that no
+test had ever walked.
+
+- `workflow convert` without `-o`/without loading, `workflow set --raw`,
+  `workflow validate` on a graph that PASSES (the happy path previously only
+  tested via the core function, never through the CLI exit code), junk link
+  rows in `link_map`, a bypassed node whose first inputs are unwired, a widget
+  that is also wired (wire wins, cursor still advances past the phantom
+  control companion), `upload_mask` with a dict `original_ref` and a None
+  `kind`, and `userdata_put` with raw bytes.
+- 8 new unit tests in `test_core.py`; 178 total, all passing.
+- Coverage: 100% statements, 100% branches, 0 partial — up from 99.36%.

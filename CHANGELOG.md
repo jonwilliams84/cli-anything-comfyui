@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented here.
 
+## [0.13.0] — 2026-09-06
+
+- Updated `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (3 files changed, 211 insertions(+))
+
+## [Unreleased] — refine round 13
+
+Coverage-honesty pass — no new commands, no CLI behaviour change.
+
+- **8 new unit tests in `test_core.py`** pinning the 11 partially-covered
+  branches that were the only dark paths left (99.36% → 100% statement AND
+  branch coverage, 178 tests, all passing): `workflow convert` without `-o`
+  and with `--no-load`; `workflow set --raw`; `workflow validate` on a graph
+  that passes (CLI exit code 0); junk link rows in `link_map`; a bypassed node
+  passing its first WIRED input through past unwired/unknown-link inputs; a
+  widget that is also wired (the wire wins and the positional cursor still
+  advances past the `control_after_generate` companion); `upload_mask` with a
+  dict `original_ref` and a None `kind`; `userdata_put` with raw bytes.
+- No existing test or check was weakened, skipped or deleted.
+
 ## [0.12.0] — 2026-09-06
 
 Maintenance release — no new commands, no CLI behaviour change.
