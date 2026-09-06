@@ -387,6 +387,22 @@ class ComfyUI:
         q = f"?overwrite={'true' if overwrite else 'false'}"
         return self._request("POST", f"/userdata/{self._userdata_path(path)}{q}", bytes(data))
 
+    def userdata_move(self, path, to, overwrite=True):
+        """Move or rename one file in the user data tree (POST /userdata/{path}/move/{to}).
+
+        BOTH route segments are single `{file}` matchers, so the slash in each
+        path is percent-encoded exactly as in `_userdata_path` — a literal
+        slash matches no route and the server answers 405, not 404.
+        `overwrite=False` lets the server refuse with HTTP 409 when the
+        destination already exists. There is no server-side copy route; a copy
+        is a get and a put (see `userdata copy` in the CLI).
+        """
+        q = f"?overwrite={'true' if overwrite else 'false'}"
+        return self._request(
+            "POST",
+            f"/userdata/{self._userdata_path(path)}/move/{self._userdata_path(to)}{q}",
+        )
+
     def userdata_delete(self, path):
         """Delete one file from the user data tree (DELETE /userdata/{path})."""
         return self._request("DELETE", f"/userdata/{self._userdata_path(path)}")

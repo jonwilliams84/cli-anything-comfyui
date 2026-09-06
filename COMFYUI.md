@@ -86,8 +86,12 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
     queue      list / cancel / clear
     history    list / get / outputs
     assets     upload an input, upload an inpainting mask, download an output
+    userdata   list / get / put / move / copy / delete the server's user tree
+               (move is the server's POST /userdata/{path}/move/{to}; copy is a
+               GET and a PUT, because the API has no copy route)
     models     what is installed, per folder
-    review     sample frames from produced media into a contact sheet
+    review     sample frames from produced media into a contact sheet (NOT BUILT
+               yet — needs an imaging dependency the harness deliberately lacks)
     traps      the recorded failure catalogue for this software
 
 ### State model

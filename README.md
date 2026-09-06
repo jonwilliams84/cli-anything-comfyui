@@ -40,6 +40,8 @@ cli-anything-comfyui run --download ./out       # queue, wait, fetch what it mad
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between
 cli-anything-comfyui userdata list user/default/workflows      # the server's saved-workflow tree
 cli-anything-comfyui userdata put user/default/workflows/r.json r.json  # push a graph into it
+cli-anything-comfyui userdata move user/default/workflows/r.json user/default/workflows/r2.json
+cli-anything-comfyui userdata copy user/default/workflows/r.json user/default/workflows/r-v2.json
 cli-anything-comfyui traps                      # the recorded ways this goes wrong
 ```
 
@@ -90,6 +92,6 @@ file. See `tests/TEST.md`.
 - **Subgraph expansion.** A node whose `class_type` is a bare UUID is a subgraph
   instance; the harness names it and refuses rather than converting it wrongly.
 - **`review`** — contact sheets and frame sampling of produced video.
-- **Userdata move/copy.** `userdata list/get/put/delete` cover the server's
-  `/userdata` CRUD; the API's `POST /userdata/{path}/move/{to}` is not wrapped
-  yet.
+- **Userdata copy is client-side.** `userdata move` wraps the server's
+  `POST /userdata/{path}/move/{to}`; `userdata copy` composes a GET and a PUT
+  because the API has no copy route.

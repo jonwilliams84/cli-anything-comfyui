@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.7.0] — 2026-09-06
+
+- Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test_core.py`, `cli_anything/comfyui/utils/comfyui_backend.py`. (5 files changed, 203 insertions(+), 4 deletions(-))
+
 ## [0.6.0] — 2026-09-06
 
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`, `cli_anything/comfyui/tests/test_full_e2e.py` and 1 more. (7 files changed, 338 insertions(+), 2 deletions(-))
