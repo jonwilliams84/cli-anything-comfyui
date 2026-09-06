@@ -2578,3 +2578,161 @@ def test_the_module_entry_point_reaches_main(monkeypatch, capsys):
         runpy.run_module("cli_anything.comfyui", run_name="__main__")
     assert exc.value.code == 0
     assert "Drive a running ComfyUI" in capsys.readouterr().out
+
+
+# --------------------------------------- refine round 13: the last dark branches
+
+
+def test_workflow_convert_without_an_out_file_and_with_no_load(monkeypatch, tmp_path):
+    """`workflow convert` with neither -o nor a load: no file is written, the
+    human output says nothing about writing, and the session stays untouched."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    canvas = tmp_path / "canvas.json"
+    canvas.write_text(
+        json.dumps(ui([node(4, "CheckpointLoaderSimple", ["a.safetensors"])])),
+        encoding="utf-8",
+    )
+    session = str(tmp_path / "s.json")
+    r = runner.invoke(
+        cl.cli,
+        ["--session", session, "workflow", "convert", str(canvas), "--no-load"],
+    )
+    assert r.exit_code == 0
+    assert "converted 1 canvas nodes -> 1 API nodes" in r.output
+    assert "wrote" not in r.output, "no -o given, so nothing was written anywhere"
+    assert not os.path.exists(session), "--no-load must not create a session file"
+
+
+def test_workflow_set_raw_keeps_the_string_the_user_typed(tmp_path):
+    """--raw keeps 'true' a string instead of coercing it to a boolean."""
+    p = _seed_session(
+        tmp_path / "s.json",
+        {"1": {"class_type": "KSampler", "inputs": {"seed": 0}}},
+    )
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "--session", str(p), "workflow", "set", "1", "seed", "true", "--raw"],
+        ).output
+    )
+    assert d["value"] == "true" and isinstance(d["value"], str)
+    assert sess.load(str(p))["workflow"]["1"]["inputs"]["seed"] == "true"
+
+
+def test_workflow_validate_passes_cleanly_and_exits_zero(monkeypatch, tmp_path):
+    """The happy path: a complete graph validates and the shell exit is 0."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    graph = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}},
+        "2": {
+            "class_type": "KSampler",
+            "inputs": {
+                "model": ["1", 0],
+                "seed": 1,
+                "steps": 4,
+                "cfg": 8.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "positive": ["1", 0],
+                "negative": ["1", 0],
+                "latent_image": ["1", 0],
+                "denoise": 1.0,
+            },
+        },
+        "3": {"class_type": "SaveImage", "inputs": {"images": ["2", 0], "filename_prefix": "x"}},
+    }
+    g = tmp_path / "g.json"
+    g.write_text(json.dumps(graph), encoding="utf-8")
+    r = runner.invoke(cl.cli, ["workflow", "validate", "--path", str(g)])
+    assert r.exit_code == 0, "a complete graph must not fail the shell"
+    assert "3 nodes: valid" in r.output
+
+
+def test_a_link_row_that_is_neither_shape_is_skipped():
+    """A positional row shorter than 5, a dict without `id`, a bare string and a
+    None are all junk the canvas may carry; none of them may wedge link_map."""
+    m = wf.link_map({"links": [[1, "a", 0, "b", 0, "IMAGE"], {"origin_id": "x"}, "junk", None]})
+    assert m == {1: ("a", 0)}
+
+
+def test_a_bypassed_node_skips_unwired_inputs_and_takes_the_wired_one():
+    """A bypassed node passes its FIRST WIRED input through; inputs whose link
+    id is dangling or null are skipped on the way, not fatal."""
+    g = ui(
+        [
+            node(4, "CheckpointLoaderSimple", ["a.safetensors"]),
+            node(
+                5,
+                "KSampler",
+                [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                inputs=[{"name": "model", "link": 9}, {"name": "positive", "link": 7}],
+                mode=4,
+            ),
+            node(2, "SaveImage", ["comfy"], inputs=[{"name": "images", "link": 8}]),
+        ],
+        links=[[7, 4, 0, 5, 1, "CONDITIONING"], [8, 5, 0, 2, 0, "IMAGE"]],
+    )
+    api, rep = wf.to_api(g, OI)
+    assert "5" not in api
+    assert api["2"]["inputs"]["images"] == ["4", 0], (
+        "the consumer is rewired through the bypassed node's first wired input, "
+        "past the input whose link id the map never heard of"
+    )
+    assert rep["warnings"] == []
+
+
+def test_a_widget_that_is_also_wired_takes_the_link_and_the_cursor_still_moves():
+    """When a schema widget is ALSO wired over a link the wire wins — but the
+    positional cursor must still advance past it AND its control_after_generate
+    companion, or every later widget lands one slot off."""
+    g = ui(
+        [
+            node(4, "CheckpointLoaderSimple", ["a.safetensors"]),
+            node(
+                1,
+                "KSampler",
+                [71177, "randomize", 4, 1.0, "euler", "simple", 1.0],
+                inputs=[{"name": "model", "link": 7}, {"name": "seed", "link": 9}],
+            ),
+            node(2, "SaveImage", ["comfy"], inputs=[{"name": "images", "link": 8}]),
+            node(3, "VAEDecode"),
+        ],
+        links=[[7, 4, 0, 1, 0, "MODEL"], [8, 1, 0, 2, 0, "IMAGE"], [9, 4, 0, 1, 1, "INT"]],
+    )
+    api, rep = wf.to_api(g, OI)
+    assert api["1"]["inputs"]["seed"] == ["4", 0], "the wire wins over the widget value"
+    assert api["1"]["inputs"]["steps"] == 4, (
+        "the cursor moved past the wired seed AND its phantom control companion"
+    )
+    assert api["1"]["inputs"]["cfg"] == 1.0
+    assert api["1"]["inputs"]["sampler_name"] == "euler"
+    assert rep["warnings"] == []
+
+
+def test_upload_mask_accepts_a_dict_original_ref_and_omits_an_unset_kind(monkeypatch, tmp_path):
+    """original_ref may arrive already as the object the server wants (the CLI
+    builds it that way for masks taken from a `workflow find` hit), and a kind
+    of None sends no `type` form field at all."""
+    reqs = _capture_requests(monkeypatch, payload=b'{"name":"mask.png"}')
+    f = tmp_path / "m.png"
+    f.write_bytes(b"\x89PNG")
+    be.ComfyUI().upload_mask(
+        str(f),
+        {"filename": "up.png", "type": "output", "subfolder": "sub"},
+        kind=None,
+    )
+    body = reqs[0].data
+    assert (
+        b'name="original_ref"\r\n\r\n{"filename": "up.png", "type": "output", '
+        b'"subfolder": "sub"}' in body
+    ), "a dict original_ref is passed through, not double-wrapped"
+    assert b'name="type"' not in body, "kind=None must not send an empty type field"
+    assert b'filename="m.png"' in body
+
+
+def test_userdata_put_sends_raw_bytes_untouched(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b"{}")
+    be.ComfyUI().userdata_put("user/default/workflows/a.bin", b"\x00\x01raw")
+    assert reqs[0].data == b"\x00\x01raw", "bytes go to the wire exactly as given"
