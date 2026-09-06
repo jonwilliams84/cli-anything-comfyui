@@ -1107,6 +1107,61 @@ def userdata_delete_cmd(ctx, path, json_):
     emit(ctx, {"deleted": path}, f"deleted {path}")
 
 
+@userdata.command("move")
+@click.argument("path")
+@click.argument("to")
+@click.option("--no-overwrite", is_flag=True, help="Refuse if TO already exists (HTTP 409).")
+@json_option
+@click.pass_context
+def userdata_move_cmd(ctx, path, to, no_overwrite, json_):
+    """Move or rename one file in the server's user data tree.
+
+    Server-side (POST /userdata/{path}/move/{to}), so it is atomic even for a
+    file the canvas currently has open.
+
+    Example: file a renamed canvas in the server's workflow library:
+
+      cli-anything-comfyui userdata move user/default/workflows/r.json \\
+          user/default/workflows/rerun.json
+    """
+    _merge_json(ctx, json_)
+    try:
+        res = client(ctx).userdata_move(path, to, overwrite=not no_overwrite)
+    except ComfyError as exc:
+        die(str(exc))
+    emit(ctx, res or {"moved": path, "to": to}, f"moved {path} -> {to}")
+
+
+@userdata.command("copy")
+@click.argument("path")
+@click.argument("to")
+@click.option("--no-overwrite", is_flag=True, help="Refuse if TO already exists (HTTP 409).")
+@json_option
+@click.pass_context
+def userdata_copy_cmd(ctx, path, to, no_overwrite, json_):
+    """Copy one file within the server's user data tree.
+
+    The API has no copy route, so this composes the two it has: the bytes are
+    fetched with GET and written with POST — the same thing the canvas does.
+
+    Example: branch a saved canvas without touching the original:
+
+      cli-anything-comfyui userdata copy user/default/workflows/r.json \\
+          user/default/workflows/r-v2.json
+    """
+    _merge_json(ctx, json_)
+    c = client(ctx)
+    try:
+        blob = c.userdata_get(path)
+    except ComfyError as exc:
+        die(str(exc))
+    try:
+        c.userdata_put(to, blob, overwrite=not no_overwrite)
+    except ComfyError as exc:
+        die(str(exc))
+    emit(ctx, {"copied": path, "to": to, "bytes": len(blob)}, f"copied {path} -> {to}")
+
+
 # ---------------------------------------------------------------------- models
 
 
@@ -1218,6 +1273,7 @@ def repl(ctx):
         "queue": "list / cancel / clear",
         "history": "list / outputs",
         "assets": "upload / mask / download",
+        "userdata": "list / get / put / move / copy / delete",
         "models": "installed models",
         "traps": "recorded failure modes",
         "help": "this list",

@@ -1686,6 +1686,7 @@ class FakeUserdataServer:
         self.tree = {"user/default/workflows/a.json": b'{"id": "a"}'}
         self.saved = {}
         self.deleted = []
+        self.moved = []
 
     def userdata_list(self, directory="user", recurse=True, full_info=False, in_use=False):
         hits = [p for p in self.tree if p.startswith(directory.strip("/") + "/") or p == directory]
@@ -1712,6 +1713,17 @@ class FakeUserdataServer:
         self.tree.pop(p, None)
         self.deleted.append(p)
         return {"deleted": p}
+
+    def userdata_move(self, path, to, overwrite=True):
+        src = path.strip("/")
+        dst = to.strip("/")
+        if src not in self.tree:
+            raise be.ComfyError(f"POST /userdata/{src}/move -> HTTP 404: not found")
+        if dst in self.tree and not overwrite:
+            raise be.ComfyError(f"POST /userdata/{dst}/move -> HTTP 409: exists")
+        self.tree[dst] = self.tree.pop(src)
+        self.moved.append((src, dst))
+        return {"path": dst}
 
 
 def test_userdata_list_sends_dir_recurse_and_full_info(monkeypatch):
@@ -1752,6 +1764,26 @@ def test_userdata_delete_uses_the_delete_method(monkeypatch):
     # percent-encoded into one segment, which is what the frontend does.
     assert "/userdata/user%2Fdefault%2Fworkflows%2Fa.json" in reqs[0].full_url
     assert "/userdata/user/default" not in reqs[0].full_url
+
+
+def test_userdata_move_hits_the_move_route_with_both_segments_encoded(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'{"path": "user/default/workflows/b.json"}')
+    be.ComfyUI().userdata_move("user/default/workflows/a.json", "user/default/workflows/b.json")
+    req = reqs[0]
+    assert req.get_method() == "POST"
+    # Both {file} and {to} are single route matchers: each path's slash is
+    # percent-encoded, and the two segments must NOT be confused with each other.
+    assert (
+        "/userdata/user%2Fdefault%2Fworkflows%2Fa.json"
+        "/move/user%2Fdefault%2Fworkflows%2Fb.json" in req.full_url
+    )
+    assert "overwrite=true" in req.full_url
+
+
+def test_userdata_move_no_overwrite_flips_the_query_flag(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b"{}")
+    be.ComfyUI().userdata_move("a.json", "b.json", overwrite=False)
+    assert "overwrite=false" in reqs[0].full_url
 
 
 def test_userdata_list_reports_the_server_tree(monkeypatch):
@@ -1830,3 +1862,92 @@ def test_userdata_delete_removes_from_the_server_tree(monkeypatch):
     )
     assert d == {"deleted": "user/default/workflows/a.json"}
     assert fake.tree == {} and fake.deleted == ["user/default/workflows/a.json"]
+
+
+def test_userdata_move_renames_in_the_server_tree(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "userdata",
+                "move",
+                "user/default/workflows/a.json",
+                "user/default/workflows/b.json",
+            ],
+        ).output
+    )
+    assert d == {"path": "user/default/workflows/b.json"}
+    assert fake.moved == [("user/default/workflows/a.json", "user/default/workflows/b.json")]
+    assert list(fake.tree) == ["user/default/workflows/b.json"]
+    # the bytes travel with the file — a move is not a create-and-drop
+    assert fake.tree["user/default/workflows/b.json"] == b'{"id": "a"}'
+
+
+def test_userdata_move_names_a_missing_source(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(
+        cl.cli, ["--json", "userdata", "move", "user/default/workflows/nope.json", "b.json"]
+    )
+    assert r.exit_code == 1 and "404" in r.output
+    assert fake.moved == [], "nothing recorded when the move failed"
+
+
+def test_userdata_move_no_overwrite_refuses_a_taken_destination(monkeypatch):
+    fake = FakeUserdataServer()
+    fake.tree["user/default/workflows/b.json"] = b'{"id": "b"}'
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(
+        cl.cli,
+        [
+            "--json",
+            "userdata",
+            "move",
+            "user/default/workflows/a.json",
+            "user/default/workflows/b.json",
+            "--no-overwrite",
+        ],
+    )
+    assert r.exit_code == 1 and "409" in r.output
+    assert fake.tree["user/default/workflows/b.json"] == b'{"id": "b"}', (
+        "the refused move must not clobber the destination"
+    )
+
+
+def test_userdata_copy_round_trips_the_bytes_through_the_client(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "userdata",
+                "copy",
+                "user/default/workflows/a.json",
+                "user/default/workflows/a-v2.json",
+            ],
+        ).output
+    )
+    assert d == {
+        "copied": "user/default/workflows/a.json",
+        "to": "user/default/workflows/a-v2.json",
+        "bytes": 11,
+    }
+    # a copy leaves BOTH files, with identical bytes — that is the whole point
+    assert fake.tree["user/default/workflows/a.json"] == b'{"id": "a"}'
+    assert fake.tree["user/default/workflows/a-v2.json"] == b'{"id": "a"}'
+    assert fake.moved == [], "copy must not be a move in disguise"
+
+
+def test_userdata_copy_falls_over_when_the_source_is_missing(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(
+        cl.cli, ["--json", "userdata", "copy", "user/default/workflows/nope.json", "b.json"]
+    )
+    assert r.exit_code == 1 and "404" in r.output
+    assert fake.saved == {}, "a failed read must not write anything"
