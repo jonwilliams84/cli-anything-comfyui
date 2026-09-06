@@ -12,7 +12,7 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — ~92 unit tests, synthetic graphs and a fake client, no server
+- `test_core.py` — ~114 unit tests, synthetic graphs and a fake client, no server
 - `test_full_e2e.py` — ~25 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
@@ -45,7 +45,39 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 - `unset_input` removes an override and errors on a missing node OR input,
   naming what exists
 - `diff_graphs` reports added/removed nodes and per-input changes (a rewire is
-  just an input whose `[id, slot]` value changed); identical graphs are `same`
+  just an input whose `[id, slot]` value changed); identical graphs are `same`;
+  a changed `class_type` is reported as an `(class_type)` input change
+- `load` names a missing file instead of raising a bare OSError
+
+### refine round 3 — the converter's edge paths
+
+The lines the first two rounds left dark, each of which is a real canvas shape:
+
+- `link_map` reads the NEWER dict-shaped link rows (`{id, origin_id, ...}`),
+  not just positional lists
+- a link whose origin node no longer exists, an input whose link id the map
+  never heard of, and a bypassed/reroute chain with nothing behind it are each
+  dropped WITH a warning — never silently
+- an input with `link: null` is canvas scaffolding and is skipped quietly
+- `widgets_values` serialised BY NAME (`{seed: 5}`) skips the positional pass
+- surplus widget values (frontend-only widget, pack drift) are ignored but
+  reported with `extra_values` and a reason
+- a node TITLE travels into `_meta`, which is what `workflow find --title`
+  reads — and `find_nodes` sorts digit ids numerically (`2` before `10`)
+- `validate` names an entry with no `class_type`
+
+### refine round 3 — backend, session and CLI edges
+
+- an HTTP error with a NON-JSON body (a proxy's HTML 502) still surfaces its text
+- an empty reply is `{}`, not a crash; `features()`/`embeddings()` hit their
+  endpoints
+- `wait` without an `on_tick` still polls, sleeps and times out cleanly
+- `session.load(url=...)` overrides the stored URL — `--url` beats last time
+- `server status` renders version/OS/VRAM in both JSON and human form
+- `workflow convert` end-to-end over a fake `/object_info`: canvas → API file
+  on disk AND loaded into the session, title included
+- `run` with a rejected graph exits 1 on stderr and records NO prompt id
+- `workflow validate` on an invalid graph exits 1, naming the problems
 
 ### `core/session.py`
 

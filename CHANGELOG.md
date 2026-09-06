@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.5.0] — 2026-09-06
+
+- Updated `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (3 files changed, 390 insertions(+), 2 deletions(-))
+
 ## [0.4.0] — 2026-09-06
 
 - Updated `comfyui.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/core/workflow.py`, `cli_anything/comfyui/skills/skill.md`, `cli_anything/comfyui/tests/test.md` and 4 more. (11 files changed, 656 insertions(+), 14 deletions(-))
@@ -37,6 +41,30 @@ Third refine pass — the patch loop and the two missing server surfaces:
   ~120 new statements. E2E suite gained the `/internal/logs` read, a real mask
   upload against a rendered image, and a set → export → diff → unset
   subprocess round trip that must end identical to its source.
+
+Fourth refine pass — no new commands; the converter's edge paths went from
+dark lines to pinned behaviour:
+
+- **Dict-shaped link rows** (`{id, origin_id, ...}`, the newer canvas
+  serialisation) are read by `link_map`; previously such a workflow converted
+  with every input silently unwired.
+- **Dangling and dead links are warned, never silent**: a link whose origin
+  node no longer exists, an input whose link id the map never heard of, and a
+  bypassed/reroute chain with nothing behind it each drop the input WITH a
+  reason. An input with `link: null` is skipped quietly.
+- **`widgets_values` by name** (`{seed: 5}`, some packs) skips the positional
+  pass; **surplus widget values** (frontend-only widget, pack drift) are
+  ignored but reported with `extra_values` and the likely cause.
+- **Node titles** travel into `_meta` (what `workflow find --title` reads), and
+  `find_nodes` sorts digit ids numerically (`2` before `10`).
+- Backend edges: a NON-JSON HTTP error body (a proxy's HTML 502) still surfaces
+  its text; an empty reply is `{}`; `wait` without `on_tick` still polls and
+  times out; `session.load(url=...)` lets `--url` beat the stored URL.
+- CLI edges pinned: `server status` in both renderers, `workflow convert`
+  end-to-end over a fake `/object_info`, a rejected `run` exits 1 and records
+  no prompt id, and `workflow validate` exits 1 on an invalid graph.
+- Unit suite expanded from 92 to 114 tests; total coverage 86.64% → 92.24%,
+  with `core/workflow.py` at 99%, `core/session.py` and `core/run.py` at 100%.
 
 Second refine pass — CLI surface completeness and coverage of what already shipped:
 
