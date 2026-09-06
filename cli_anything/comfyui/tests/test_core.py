@@ -7,11 +7,17 @@ it is the part four hand-rolled `wf2api` scripts in `~/ai-video` got wrong.
 
 from __future__ import annotations
 
+import io
 import json
+import os
 import threading
+import urllib.error
 
 import pytest
+from click.testing import CliRunner
 
+from cli_anything.comfyui import comfyui_cli as cl
+from cli_anything.comfyui.core import run as run_core
 from cli_anything.comfyui.core import session as sess
 from cli_anything.comfyui.core import workflow as wf
 from cli_anything.comfyui.utils import comfyui_backend as be
@@ -443,3 +449,394 @@ def test_queue_row_helpers_tolerate_short_rows():
     q = {"queue_pending": [[1, "a"], [2, "b"]]}
     assert be._position(q, "b") == 2
     assert be._position(q, "missing") is None
+
+
+# ----------------------------------------------------------- run core (no server)
+
+
+class FakeClient:
+    """A ComfyUI that answers from memory — for the parts that are logic, not HTTP."""
+
+    def __init__(self, outputs=None, fail_on=(), drop_prompt_id=False):
+        self.outputs = outputs or {}
+        self.fail_on = set(fail_on)
+        self.drop_prompt_id = drop_prompt_id
+        self.submitted = []
+        self.freed = 0
+        self.wrote = {}
+
+    def submit(self, graph, front=False, extra_data=None):
+        self.submitted.append(graph)
+        if len(self.submitted) - 1 in self.fail_on:
+            raise be.ComfyError("window exploded")
+        if self.drop_prompt_id:
+            return {"number": 1}
+        return {"prompt_id": f"pid-{len(self.submitted)}", "number": len(self.submitted)}
+
+    def wait(self, prompt_id, timeout=1800, poll=1.0, on_tick=None):
+        return {
+            "prompt_id": prompt_id,
+            "history": dict(self.outputs),
+            "completed": True,
+            "status": "success",
+            "waited_s": 0.0,
+        }
+
+    def free(self, **kw):
+        self.freed += 1
+        return {"unload_models": True}
+
+    def download(self, filename, dest, subfolder="", kind="output"):
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        data = b"" if filename == "empty.png" else b"\x89PNG\r\n\x1a\n"
+        with open(dest, "wb") as fh:
+            fh.write(data)
+        self.wrote[dest] = data
+        return {"path": dest, "bytes": len(data)}
+
+
+OUT_ENTRY = {
+    "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}}
+}
+
+
+def test_submit_and_wait_flattens_the_outputs():
+    res = run_core.submit_and_wait(FakeClient(outputs=OUT_ENTRY), {"1": {"class_type": "X"}})
+    assert res["prompt_id"] == "pid-1"
+    assert res["output_count"] == 1
+    assert res["outputs"][0]["filename"] == "a.png"
+    assert res["completed"] is True
+
+
+def test_submit_and_wait_without_a_prompt_id_raises():
+    with pytest.raises(RuntimeError, match="no prompt_id"):
+        run_core.submit_and_wait(FakeClient(drop_prompt_id=True), {})
+
+
+def test_fetch_verifies_each_file_landed(tmp_path):
+    files = [
+        {"filename": "a.png", "subfolder": "", "type": "output"},
+        {"filename": "empty.png", "subfolder": "", "type": "output"},
+    ]
+    got = run_core.fetch(FakeClient(), files, str(tmp_path))
+    assert got["downloaded"] == 1
+    assert got["empty"] == [got["files"][1]["path"]], "a zero-byte file must not count as fetched"
+    with open(got["files"][0]["path"], "rb") as fh:
+        assert fh.read(4) == b"\x89PNG"
+
+
+def test_run_windows_keeps_going_when_a_window_fails():
+    c = FakeClient(outputs=OUT_ENTRY, fail_on={1})
+    seen = []
+    res = run_core.run_windows(c, [{}, {}, {}], on_window=seen.append)
+    assert res["succeeded"] == 2 and res["failed"] == 1
+    assert "ComfyError" in res["results"][1]["error"]
+    assert res["results"][1]["ok"] is False
+    assert c.freed == 2, "VRAM freed between windows even after a failure"
+    assert len(seen) == 3 and seen[1]["label"] == "window 2/3"
+    assert len(res["outputs"]) == 2, "the failed window's outputs are absent, the rest present"
+
+
+def test_run_windows_can_keep_vram_resident():
+    c = FakeClient(outputs=OUT_ENTRY)
+    res = run_core.run_windows(c, [{}, {}], free_between=False)
+    assert res["failed"] == 0 and c.freed == 0
+
+
+# --------------------------------------------------- backend transport (no server)
+
+
+def test_a_url_must_be_http_or_https():
+    with pytest.raises(ValueError, match="http"):
+        be.ComfyUI(url="file:///etc/passwd")
+    with pytest.raises(ValueError, match="http"):
+        be.ComfyUI(url="ftp://host/path")
+    with pytest.raises(ValueError, match="http"):
+        be.ComfyUI(url="http://")  # no host
+    assert be.ComfyUI(url="http://10.0.0.5:8188").url == "http://10.0.0.5:8188"
+
+
+def _patch_urlopen(monkeypatch, behaviour):
+    calls = []
+
+    def fake(req, timeout=None):
+        calls.append((req.get_method(), req.full_url))
+        return behaviour(req)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    return calls
+
+
+def test_an_http_error_surfaces_the_body(monkeypatch):
+    exc = urllib.error.HTTPError(
+        "http://x/models", 400, "Bad", {}, io.BytesIO(b'{"detail":"nope"}')
+    )
+    _patch_urlopen(monkeypatch, lambda req: (_ for _ in ()).throw(exc))
+    with pytest.raises(be.ComfyError, match="HTTP 400"):
+        be.ComfyUI().models("checkpoints")
+
+
+def test_a_rejected_prompt_post_raises_prompt_rejected(monkeypatch):
+    body = json.dumps(
+        {"error": {"message": "Failed to validate prompt"}, "node_errors": {"3": {}}}
+    ).encode()
+    exc = urllib.error.HTTPError("http://x/prompt", 400, "Bad", {}, io.BytesIO(body))
+    _patch_urlopen(monkeypatch, lambda req: (_ for _ in ()).throw(exc))
+    with pytest.raises(be.ComfyPromptRejected):
+        be.ComfyUI().submit({"1": {"class_type": "X", "inputs": {}}})
+
+
+def test_a_dead_server_raises_comfy_unavailable(monkeypatch):
+    exc = urllib.error.URLError(OSError("connection refused"))
+    _patch_urlopen(monkeypatch, lambda req: (_ for _ in ()).throw(exc))
+    with pytest.raises(be.ComfyUnavailable, match="No ComfyUI at"):
+        be.ComfyUI().system_stats()
+
+
+def test_a_non_json_reply_is_an_error_not_a_crash(monkeypatch):
+    _patch_urlopen(monkeypatch, lambda req: io.BytesIO(b"<html>bad gateway</html>"))
+    with pytest.raises(be.ComfyError, match="did not return JSON"):
+        be.ComfyUI().queue()
+
+
+def test_view_returns_raw_bytes(monkeypatch):
+    _patch_urlopen(monkeypatch, lambda req: io.BytesIO(b"PNGDATA"))
+    assert be.ComfyUI().view("a.png") == b"PNGDATA"
+
+
+def test_is_up_reflects_reachability(monkeypatch):
+    c = be.ComfyUI()
+    _patch_urlopen(monkeypatch, lambda req: io.BytesIO(b"{}"))
+    assert c.is_up() is True
+    exc = urllib.error.URLError(OSError("down"))
+    _patch_urlopen(monkeypatch, lambda req: (_ for _ in ()).throw(exc))
+    assert c.is_up() is False
+
+
+def test_submit_raises_prompt_rejected_when_the_reply_carries_node_errors(monkeypatch):
+    reply = json.dumps(
+        {"prompt_id": "x", "number": 1, "node_errors": {"3": {"errors": [{"message": "bad"}]}}}
+    ).encode()
+    _patch_urlopen(monkeypatch, lambda req: io.BytesIO(reply))
+    with pytest.raises(be.ComfyPromptRejected):
+        be.ComfyUI().submit({"1": {"class_type": "X", "inputs": {}}})
+
+
+def test_wait_times_out_and_says_so(monkeypatch):
+    c = be.ComfyUI()
+    monkeypatch.setattr(c, "history", lambda pid=None, max_items=None: {})
+    with pytest.raises(be.ComfyError, match="still not finished"):
+        c.wait("pid", timeout=-1, poll=0)
+
+
+def test_wait_reports_the_queue_position_through_on_tick(monkeypatch):
+    c = be.ComfyUI()
+    pages = [{}, {"pid": {"status": {"completed": True}, "outputs": {}}}]
+    monkeypatch.setattr(c, "history", lambda pid=None, max_items=None: pages.pop(0))
+    q = {"queue_running": [[1, "pid"]], "queue_pending": [[2, "other"], [3, "pid"]]}
+    monkeypatch.setattr(c, "queue", lambda: q)
+    ticks = []
+    done = c.wait("pid", timeout=5, poll=0, on_tick=ticks.append)
+    assert done["completed"] is True
+    assert ticks[0]["running"] is True and ticks[0]["pending_position"] == 2
+
+
+def test_download_writes_the_bytes_to_disk(monkeypatch, tmp_path):
+    _patch_urlopen(monkeypatch, lambda req: io.BytesIO(b"PNGDATA"))
+    dest = tmp_path / "a.png"
+    res = be.ComfyUI().download("a.png", str(dest))
+    assert res["bytes"] == 7 and dest.read_bytes() == b"PNGDATA"
+
+
+def test_upload_refuses_a_missing_file(tmp_path):
+    with pytest.raises(be.ComfyError, match="no such file"):
+        be.ComfyUI().upload_image(str(tmp_path / "missing.png"))
+
+
+# --------------------------------------------------------------- the CLI commands
+
+
+runner = CliRunner()
+
+
+def _write_api_graph(path, prefix="cli"):
+    graph = {
+        "1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64}},
+        "2": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["1", 0], "filename_prefix": prefix},
+        },
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(graph, fh)
+    return path
+
+
+def _seed_session(path, graph):
+    st = sess.new(path=str(path))
+    st["workflow"] = graph
+    sess.save(st)
+    return path
+
+
+def test_the_cli_reports_its_version():
+    assert "0.1.0" in runner.invoke(cl.cli, ["--version"]).output
+
+
+def test_traps_list_and_one_in_full():
+    d = json.loads(runner.invoke(cl.cli, ["--json", "traps"]).output)
+    assert d["count"] >= 8 and "control-after-generate" in {t["id"] for t in d["traps"]}
+    human = runner.invoke(cl.cli, ["traps", "--id", "control-after-generate"])
+    assert human.exit_code == 0 and "control-after-generate" in human.output
+
+
+def test_an_unknown_trap_id_names_the_known_ones():
+    r = runner.invoke(cl.cli, ["traps", "--id", "nope"])
+    assert r.exit_code == 1 and "control-after-generate" in r.output
+
+
+def test_status_reports_session_state_even_with_the_server_down(tmp_path, monkeypatch):
+    class Down:
+        def __init__(self, **kw):
+            self.url = kw.get("url") or "http://x"
+
+        def is_up(self):
+            return False
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "KSampler", "inputs": {}}})
+    d = json.loads(runner.invoke(cl.cli, ["--json", "--session", str(p), "status"]).output)
+    assert d["server_up"] is False and d["nodes"] == 1
+
+
+def test_workflow_set_patches_the_session_and_find_sees_it(tmp_path):
+    p = _seed_session(
+        tmp_path / "s.json",
+        {
+            "1": {
+                "class_type": "KSampler",
+                "inputs": {"seed": 1},
+                "_meta": {"title": "sampler"},
+            }
+        },
+    )
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "set", "1", "seed", "42"])
+    assert r.exit_code == 0, r.output
+    assert sess.load(str(p))["workflow"]["1"]["inputs"]["seed"] == 42
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "--session", str(p), "workflow", "find", "--type", "KSampler"]
+        ).output
+    )
+    assert d["count"] == 1 and d["matches"][0]["title"] == "sampler"
+
+
+def test_workflow_set_without_a_workflow_says_so(tmp_path):
+    r = runner.invoke(
+        cl.cli,
+        ["--json", "--session", str(tmp_path / "s.json"), "workflow", "set", "1", "seed", "42"],
+    )
+    assert r.exit_code == 1 and "no workflow loaded" in r.output
+
+
+def test_workflow_convert_with_no_server_fails_loudly(tmp_path, monkeypatch):
+    class Down:
+        def __init__(self, **kw):
+            pass
+
+        def object_info(self):
+            raise be.ComfyUnavailable("http://127.0.0.1:8188")
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    canvas = tmp_path / "c.json"
+    canvas.write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+    r = runner.invoke(
+        cl.cli,
+        ["--json", "--session", str(tmp_path / "s.json"), "workflow", "convert", str(canvas)],
+    )
+    assert r.exit_code == 1 and "No ComfyUI" in r.output
+
+
+def test_run_queues_the_session_graph_and_records_the_prompt_id(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    dest = tmp_path / "out"
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "--session", str(p), "run", "--download", str(dest)]
+        ).output
+    )
+    assert d["output_count"] == 1
+    assert fake.submitted, "the graph was never submitted"
+    assert sess.load(str(p))["last_prompt_id"] == d["prompt_id"]
+    assert d["download"]["downloaded"] == 1
+
+
+def test_windows_runs_every_graph_frees_between_and_downloads(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g1 = str(_write_api_graph(tmp_path / "w1.json"))
+    g2 = str(_write_api_graph(tmp_path / "w2.json"))
+    dest = tmp_path / "out"
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "--session",
+                str(tmp_path / "s.json"),
+                "windows",
+                g1,
+                g2,
+                "--download",
+                str(dest),
+            ],
+        ).output
+    )
+    assert d["succeeded"] == 2 and d["failed"] == 0
+    assert fake.freed == 1, "one free between two windows"
+    assert d["download"]["downloaded"] == 2
+    assert dest.is_dir()
+
+
+def test_windows_fails_with_an_exit_code_when_a_window_fails(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY, fail_on={1})
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g1 = str(_write_api_graph(tmp_path / "w1.json"))
+    g2 = str(_write_api_graph(tmp_path / "w2.json"))
+    r = runner.invoke(cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "windows", g1, g2])
+    assert r.exit_code == 1
+    d = json.loads(r.output)
+    assert d["succeeded"] == 1 and d["failed"] == 1
+
+
+def test_server_features_and_embeddings_reach_the_server(monkeypatch):
+    class Up:
+        def __init__(self, **kw):
+            pass
+
+        def features(self):
+            return {"supports_preview_metadata": True}
+
+        def embeddings(self):
+            return ["clip_vision", "samdash"]
+
+    monkeypatch.setattr(cl, "ComfyUI", Up)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "features"]).output)
+    assert d["supports_preview_metadata"] is True
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "embeddings"]).output)
+    assert d["count"] == 2
+
+
+def test_server_features_with_no_server_names_the_problem(monkeypatch):
+    class Down:
+        def __init__(self, **kw):
+            pass
+
+        def features(self):
+            raise be.ComfyUnavailable("http://127.0.0.1:8188")
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    r = runner.invoke(cl.cli, ["--json", "server", "features"])
+    assert r.exit_code == 1 and "No ComfyUI" in r.output

@@ -29,11 +29,13 @@ cli-anything-comfyui --version
 
 ```bash
 cli-anything-comfyui server status              # version, devices, free VRAM
+cli-anything-comfyui server features            # the server's feature flags
 cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, which are links
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
 cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
+cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between
 cli-anything-comfyui traps                      # the recorded ways this goes wrong
 ```
 
@@ -84,5 +86,5 @@ file. See `tests/TEST.md`.
 - **Subgraph expansion.** A node whose `class_type` is a bare UUID is a subgraph
   instance; the harness names it and refuses rather than converting it wrongly.
 - **`review`** — contact sheets and frame sampling of produced video.
-- Windowed rendering (`run_windows`) exists in the core but has no CLI command
-  or E2E test yet.
+- Windowed rendering (`windows`) is a CLI command, unit-tested against a fake
+  client, but has no E2E test yet.

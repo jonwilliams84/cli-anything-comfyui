@@ -12,7 +12,7 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — ~40 unit tests, synthetic graphs, no server
+- `test_core.py` — ~60 unit tests, synthetic graphs and a fake client, no server
 - `test_full_e2e.py` — ~20 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
@@ -57,6 +57,38 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 - `outputs_of` reads **every** bucket — images, gifs, videos, audio — not just
   images, which is the bug that makes video workflows look empty
 - queue row helpers tolerate short/garbage rows
+- `_http_only` pins the scheme to http/https — `file://` and `ftp://` refused
+  at the one place a URL enters the object
+- the HTTP error paths, with `urlopen` faked: an HTTP error surfaces the body,
+  a 400 on `POST /prompt` becomes `ComfyPromptRejected`, a dead server becomes
+  `ComfyUnavailable`, and a non-JSON reply is an error, not a crash
+- `submit` also raises `ComfyPromptRejected` when the 200 reply carries
+  `node_errors`
+- `wait` times out with a message that says so, and reports the live queue
+  position through `on_tick`
+
+### `core/run.py` (fake client, no server)
+
+- `submit_and_wait` flattens outputs from every bucket; a reply with no
+  `prompt_id` raises rather than silently "succeeding"
+- `fetch` re-stats every file on THIS disk: a zero-byte download lands in
+  `empty`, not in the downloaded count
+- `run_windows` keeps going when a window fails, frees VRAM between windows
+  (even after a failure), honours `free_between=False`, and reports each window
+  through `on_window`
+
+### the CLI (`CliRunner`, no server)
+
+- `--version`; `traps` list, one in full, and an unknown id naming the known ones
+- `status` reports session state with the server down, without dying
+- `workflow set` patches the session and `workflow find` sees it; with no
+  workflow loaded it says so and exits 1
+- `workflow convert` with no server fails loudly, naming the URL
+- `run` queues the session graph, downloads, and records the `prompt_id`
+- `windows` runs every graph, frees between windows, downloads the outputs,
+  and exits non-zero when a window failed
+- `server features` / `server embeddings` reach the server; with no server they
+  name the problem
 
 ## E2E plan (`test_full_e2e.py`) — real server required
 
@@ -196,6 +228,29 @@ Not covered, and honestly so:
 - **`review`** (contact sheets / frame sampling of produced video) is designed
   in COMFYUI.md but not built. 45 of the 116 archived scripts shell out to
   ffmpeg, so this is the largest remaining gap.
-- **Windowed rendering** (`run_windows`) is implemented and unit-reachable but
-  has no E2E test — a truthful one needs a multi-minute video model load.
+- **Windowed rendering** (`windows`) is exposed as a command and covered by
+  unit tests against a fake client (failure isolation, VRAM freeing between
+  windows, download), but has no E2E test — a truthful one needs a
+  multi-minute video model load.
 - No test asserts behaviour when ComfyUI dies *mid-render*.
+
+---
+
+# Refine pass — 2026-09-06
+
+Ran the CI gate exactly as the pipeline does:
+
+```
+python -m pytest cli_anything/comfyui/tests/test_core.py --cov=cli_anything
+  --cov-fail-under=30 -q --durations=10
+ruff check cli_anything/ --output-format=github
+ruff format --check --diff cli_anything/
+bandit -r cli_anything/ -ll -x '*/tests/*,*/test_*.py,*/conftest.py'
+```
+
+Result: **exit 0** — 60 unit tests pass, coverage **69.98%** (was 34.00%),
+lint clean, format clean, bandit clean.
+
+New since the 0.1.0 build: unit coverage of `core/run.py` (96%), the backend's
+HTTP transport (79%), and the CLI command layer (52%); the `windows`,
+`server features` and `server embeddings` commands.

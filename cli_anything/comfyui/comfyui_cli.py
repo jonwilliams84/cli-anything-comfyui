@@ -182,6 +182,36 @@ def server_interrupt(ctx, json_):
         die(str(exc))
 
 
+@server.command("features")
+@json_option
+@click.pass_context
+def server_features(ctx, json_):
+    """The server's feature flags (/features)."""
+    _merge_json(ctx, json_)
+    try:
+        emit(ctx, client(ctx).features())
+    except ComfyError as exc:
+        die(str(exc))
+
+
+@server.command("embeddings")
+@json_option
+@click.pass_context
+def server_embeddings(ctx, json_):
+    """The embeddings this server has."""
+    _merge_json(ctx, json_)
+    try:
+        res = client(ctx).embeddings()
+    except ComfyError as exc:
+        die(str(exc))
+    items = res if isinstance(res, list) else list(res or {})
+    emit(
+        ctx,
+        {"count": len(items), "items": items},
+        [f"{len(items)} embedding(s)"] + [f"  {i}" for i in items[:40]],
+    )
+
+
 # ----------------------------------------------------------------------- nodes
 
 
@@ -555,6 +585,46 @@ def run_cmd(ctx, path, timeout, front, dest, json_):
     emit(ctx, res, lines)
 
 
+@cli.command("windows")
+@click.argument("paths", nargs=-1, required=True, type=click.Path())
+@click.option("--timeout", default=1800, show_default=True, type=int)
+@click.option("--keep-vram", is_flag=True, default=False, help="Do NOT free VRAM between windows.")
+@click.option(
+    "--download", "dest", default=None, help="Download every produced file into this directory."
+)
+@json_option
+@click.pass_context
+def windows_cmd(ctx, paths, timeout, keep_vram, dest, json_):
+    """Run several graphs as ONE windowed render, freeing VRAM between them.
+
+    The loop every long film on this estate is made with. A window that fails
+    does not abort the rest — losing window 7 of 12 should still hand back the
+    other eleven. Each PATH is a workflow file (canvas or API format).
+    """
+    _merge_json(ctx, json_)
+    graphs = [_graph(ctx, p) for p in paths]
+    c = client(ctx)
+    try:
+        res = run_core.run_windows(c, graphs, timeout=timeout, free_between=not keep_vram)
+    except ComfyError as exc:
+        die(str(exc))
+    if dest and res["outputs"]:
+        res["download"] = run_core.fetch(c, res["outputs"], dest)
+    lines = [f"{res['succeeded']}/{res['windows']} window(s) finished"]
+    for r in res["results"]:
+        if r.get("ok"):
+            lines.append(f"  window {r['window']}: {r['output_count']} file(s)")
+        else:
+            lines.append(f"  window {r['window']}: FAILED — {r['error']}")
+    if res.get("download"):
+        lines.append(
+            f"  downloaded {res['download']['downloaded']} file(s) to {res['download']['dir']}"
+        )
+    emit(ctx, res, lines)
+    if res["failed"]:
+        sys.exit(1)
+
+
 # ----------------------------------------------------------------- queue/history
 
 
@@ -830,10 +900,11 @@ def repl(ctx):
     pt = skin.create_prompt_session()
     commands = {
         "status": "session + server state",
-        "server": "status / free / interrupt",
+        "server": "status / features / embeddings / free / interrupt",
         "nodes": "list / search / schema",
         "workflow": "convert / deps / info / find / set / validate",
         "run": "queue the loaded graph and wait",
+        "windows": "run several graphs, freeing VRAM between them",
         "queue": "list / cancel / clear",
         "history": "list / outputs",
         "assets": "upload / download",
