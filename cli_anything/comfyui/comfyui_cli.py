@@ -22,6 +22,7 @@ _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 # --------------------------------------------------------------------- output
 
+
 def emit(ctx, payload, human=None):
     """One printer. `--json` anywhere in the invocation wins."""
     if ctx.obj.get("json"):
@@ -39,8 +40,9 @@ def die(msg, code=1):
     sys.exit(code)
 
 
-json_option = click.option("--json", "json_", is_flag=True, default=False,
-                           help="Machine-readable output.")
+json_option = click.option(
+    "--json", "json_", is_flag=True, default=False, help="Machine-readable output."
+)
 
 
 def _merge_json(ctx, json_):
@@ -72,9 +74,16 @@ def _autosave(ctx, state):
 
 # ------------------------------------------------------------------ root group
 
+
 @click.group(invoke_without_command=True)
-@click.option("--url", default=None, help=f"ComfyUI base URL (default {DEFAULT_URL}, or $COMFYUI_URL).")
-@click.option("--session", default=None, help="Session file (default ~/.config/cli-anything-comfyui/session.json).")
+@click.option(
+    "--url", default=None, help=f"ComfyUI base URL (default {DEFAULT_URL}, or $COMFYUI_URL)."
+)
+@click.option(
+    "--session",
+    default=None,
+    help="Session file (default ~/.config/cli-anything-comfyui/session.json).",
+)
 @click.option("--timeout", default=60, type=int, show_default=True, help="HTTP timeout, seconds.")
 @click.option("--dry-run", is_flag=True, default=False, help="Do not save session changes.")
 @click.option("--json", "json_", is_flag=True, default=False, help="Machine-readable output.")
@@ -87,13 +96,15 @@ def cli(ctx, url, session, timeout, dry_run, json_):
     Start one first (the Desktop app, or `python main.py --listen 0.0.0.0`).
     """
     ctx.ensure_object(dict)
-    ctx.obj.update({"url": url, "session": session, "timeout": timeout,
-                    "dry_run": dry_run, "json": json_})
+    ctx.obj.update(
+        {"url": url, "session": session, "timeout": timeout, "dry_run": dry_run, "json": json_}
+    )
     if ctx.invoked_subcommand is None:
         ctx.invoke(repl)
 
 
 # ---------------------------------------------------------------------- server
+
 
 @cli.group()
 def server():
@@ -114,13 +125,24 @@ def server_status(ctx, json_):
     sysinfo = s.get("system") or {}
     devs = []
     for d in s.get("devices") or []:
-        devs.append({"name": d.get("name"), "type": d.get("type"),
-                     "vram_total_gb": round((d.get("vram_total") or 0) / 2**30, 1),
-                     "vram_free_gb": round((d.get("vram_free") or 0) / 2**30, 1)})
-    payload = {"url": c.url, "up": True, "comfyui_version": sysinfo.get("comfyui_version"),
-               "os": sysinfo.get("os"), "python": sysinfo.get("python_version", "")[:12],
-               "ram_free_gb": round((sysinfo.get("ram_free") or 0) / 2**30, 1),
-               "devices": devs, "argv": sysinfo.get("argv") or []}
+        devs.append(
+            {
+                "name": d.get("name"),
+                "type": d.get("type"),
+                "vram_total_gb": round((d.get("vram_total") or 0) / 2**30, 1),
+                "vram_free_gb": round((d.get("vram_free") or 0) / 2**30, 1),
+            }
+        )
+    payload = {
+        "url": c.url,
+        "up": True,
+        "comfyui_version": sysinfo.get("comfyui_version"),
+        "os": sysinfo.get("os"),
+        "python": sysinfo.get("python_version", "")[:12],
+        "ram_free_gb": round((sysinfo.get("ram_free") or 0) / 2**30, 1),
+        "devices": devs,
+        "argv": sysinfo.get("argv") or [],
+    }
     lines = [f"ComfyUI {payload['comfyui_version']} on {payload['os']}  ({c.url})"]
     for d in devs:
         lines.append(f"  {d['name']}  {d['vram_free_gb']}/{d['vram_total_gb']} GB VRAM free")
@@ -129,7 +151,9 @@ def server_status(ctx, json_):
 
 
 @server.command("free")
-@click.option("--keep-models", is_flag=True, default=False, help="Free cache but keep models resident.")
+@click.option(
+    "--keep-models", is_flag=True, default=False, help="Free cache but keep models resident."
+)
 @json_option
 @click.pass_context
 def server_free(ctx, keep_models, json_):
@@ -160,6 +184,7 @@ def server_interrupt(ctx, json_):
 
 # ----------------------------------------------------------------------- nodes
 
+
 @cli.group()
 def nodes():
     """The node types this ComfyUI has, and what their inputs are called."""
@@ -185,8 +210,12 @@ def nodes_list(ctx, category, limit, json_):
         rows.append({"name": name, "category": cat, "output_node": bool(info.get("output_node"))})
     rows.sort(key=lambda r: (r["category"], r["name"]))
     payload = {"count": len(rows), "shown": min(limit, len(rows)), "nodes": rows[:limit]}
-    emit(ctx, payload, [f"{len(rows)} node types (showing {min(limit, len(rows))})"] +
-         [f"  {r['name']:44s} {r['category']}" for r in rows[:limit]])
+    emit(
+        ctx,
+        payload,
+        [f"{len(rows)} node types (showing {min(limit, len(rows))})"]
+        + [f"  {r['name']:44s} {r['category']}" for r in rows[:limit]],
+    )
 
 
 @nodes.command("search")
@@ -202,14 +231,22 @@ def nodes_search(ctx, text, limit, json_):
     except ComfyError as exc:
         die(str(exc))
     t = text.lower()
-    hits = [{"name": n, "category": (i.get("category") or ""),
-             "output_node": bool(i.get("output_node"))}
-            for n, i in oi.items()
-            if t in n.lower() or t in (i.get("category") or "").lower()]
+    hits = [
+        {
+            "name": n,
+            "category": (i.get("category") or ""),
+            "output_node": bool(i.get("output_node")),
+        }
+        for n, i in oi.items()
+        if t in n.lower() or t in (i.get("category") or "").lower()
+    ]
     hits.sort(key=lambda h: (len(h["name"]), h["name"]))
-    emit(ctx, {"query": text, "count": len(hits), "matches": hits[:limit]},
-         [f"{len(hits)} match(es) for {text!r}"] +
-         [f"  {h['name']:44s} {h['category']}" for h in hits[:limit]])
+    emit(
+        ctx,
+        {"query": text, "count": len(hits), "matches": hits[:limit]},
+        [f"{len(hits)} match(es) for {text!r}"]
+        + [f"  {h['name']:44s} {h['category']}" for h in hits[:limit]],
+    )
 
 
 @nodes.command("schema")
@@ -234,18 +271,27 @@ def nodes_schema(ctx, class_type, json_):
     for name, spec in wf.schema_inputs(oi, class_type):
         t = spec[0] if isinstance(spec, list) and spec else spec
         opts = spec[1] if isinstance(spec, list) and len(spec) > 1 else {}
-        rows.append({"name": name,
-                     "type": "COMBO" if isinstance(t, list) else t,
-                     "widget": wf._is_widget(spec),
-                     "control_after_generate": wf._has_control_after_generate(spec),
-                     "default": (opts or {}).get("default") if isinstance(opts, dict) else None,
-                     "choices": t[:8] if isinstance(t, list) else None})
-    payload = {"class_type": class_type, "category": info.get("category"),
-               "output_node": bool(info.get("output_node")),
-               "outputs": info.get("output_name") or info.get("output") or [],
-               "inputs": rows}
-    lines = [f"{class_type}  ({info.get('category')})",
-             f"  outputs: {', '.join(str(o) for o in payload['outputs'])}"]
+        rows.append(
+            {
+                "name": name,
+                "type": "COMBO" if isinstance(t, list) else t,
+                "widget": wf._is_widget(spec),
+                "control_after_generate": wf._has_control_after_generate(spec),
+                "default": (opts or {}).get("default") if isinstance(opts, dict) else None,
+                "choices": t[:8] if isinstance(t, list) else None,
+            }
+        )
+    payload = {
+        "class_type": class_type,
+        "category": info.get("category"),
+        "output_node": bool(info.get("output_node")),
+        "outputs": info.get("output_name") or info.get("output") or [],
+        "inputs": rows,
+    }
+    lines = [
+        f"{class_type}  ({info.get('category')})",
+        f"  outputs: {', '.join(str(o) for o in payload['outputs'])}",
+    ]
     for r in rows:
         kind = "widget" if r["widget"] else "link"
         extra = " +control_after_generate" if r["control_after_generate"] else ""
@@ -254,6 +300,7 @@ def nodes_schema(ctx, class_type, json_):
 
 
 # -------------------------------------------------------------------- workflow
+
 
 @cli.group()
 def workflow():
@@ -319,9 +366,13 @@ def workflow_deps(ctx, path, json_):
         api, report = wf.to_api(ui, _object_info(ctx), strict=False)
     except (wf.WorkflowError, ComfyError) as exc:
         die(str(exc))
-    payload = {"source": path, "missing_node_types": report["missing_node_types"],
-               "subgraphs": report["subgraphs"], "nodes": len(api),
-               "satisfied": not report["missing_node_types"]}
+    payload = {
+        "source": path,
+        "missing_node_types": report["missing_node_types"],
+        "subgraphs": report["subgraphs"],
+        "nodes": len(api),
+        "satisfied": not report["missing_node_types"],
+    }
     if payload["satisfied"] and not payload["subgraphs"]:
         lines = ["every node type in this workflow is installed"]
     else:
@@ -335,7 +386,9 @@ def workflow_deps(ctx, path, json_):
 
 
 @workflow.command("info")
-@click.option("--path", "path", default=None, type=click.Path(), help="Inspect a file instead of the session.")
+@click.option(
+    "--path", "path", default=None, type=click.Path(), help="Inspect a file instead of the session."
+)
 @json_option
 @click.pass_context
 def workflow_info(ctx, path, json_):
@@ -350,8 +403,11 @@ def workflow_info(ctx, path, json_):
     by_type = {}
     for e in api.values():
         by_type[e.get("class_type")] = by_type.get(e.get("class_type"), 0) + 1
-    payload = {"nodes": len(api), "output_nodes": outs,
-               "by_class_type": dict(sorted(by_type.items(), key=lambda kv: -kv[1]))}
+    payload = {
+        "nodes": len(api),
+        "output_nodes": outs,
+        "by_class_type": dict(sorted(by_type.items(), key=lambda kv: -kv[1])),
+    }
     lines = [f"{len(api)} nodes, {len(outs)} output node(s)"]
     if not outs:
         lines.append("  WARNING: no output node — this graph will run and write nothing")
@@ -370,10 +426,16 @@ def workflow_find(ctx, class_type, title, json_):
     _merge_json(ctx, json_)
     api = _graph(ctx, None)
     hits = wf.find_nodes(api, class_type=class_type, title=title)
-    emit(ctx, {"count": len(hits), "matches": hits},
-         [f"{len(hits)} match(es)"] +
-         [f"  node {h['node']:>5s}  {h['class_type']}" + (f"  “{h['title']}”" if h["title"] else "")
-          for h in hits])
+    emit(
+        ctx,
+        {"count": len(hits), "matches": hits},
+        [f"{len(hits)} match(es)"]
+        + [
+            f"  node {h['node']:>5s}  {h['class_type']}"
+            + (f"  “{h['title']}”" if h["title"] else "")
+            for h in hits
+        ],
+    )
 
 
 @workflow.command("set")
@@ -393,7 +455,7 @@ def workflow_set(ctx, node_id, name, value, raw, json_):
     val = value
     if not raw:
         try:
-            val = _json.loads(value)          # numbers, booleans, and [id, slot] links
+            val = _json.loads(value)  # numbers, booleans, and [id, slot] links
         except _json.JSONDecodeError:
             val = value
     try:
@@ -401,8 +463,12 @@ def workflow_set(ctx, node_id, name, value, raw, json_):
     except wf.WorkflowError as exc:
         die(str(exc))
     saved = _autosave(ctx, st)
-    emit(ctx, {"node": str(node_id), "input": name, "value": val, "session": saved},
-         f"node {node_id}.{name} = {val!r}" + ("  (dry run — not saved)" if saved.get("dry_run") else ""))
+    emit(
+        ctx,
+        {"node": str(node_id), "input": name, "value": val, "session": saved},
+        f"node {node_id}.{name} = {val!r}"
+        + ("  (dry run — not saved)" if saved.get("dry_run") else ""),
+    )
 
 
 @workflow.command("validate")
@@ -417,7 +483,9 @@ def workflow_validate(ctx, path, json_):
         res = wf.validate(api, _object_info(ctx))
     except ComfyError as exc:
         die(str(exc))
-    lines = [f"{res['nodes']} nodes: " + ("valid" if res["ok"] else f"{len(res['problems'])} problem(s)")]
+    lines = [
+        f"{res['nodes']} nodes: " + ("valid" if res["ok"] else f"{len(res['problems'])} problem(s)")
+    ]
     for p in res["problems"][:15]:
         lines.append(f"  node {p['node']} {p.get('input', '')}: {p['problem']}")
     emit(ctx, res, lines)
@@ -444,8 +512,15 @@ def _graph(ctx, path):
 
 # ------------------------------------------------------------------------- run
 
+
 @cli.command("run")
-@click.option("--path", "path", default=None, type=click.Path(), help="Run this file instead of the session graph.")
+@click.option(
+    "--path",
+    "path",
+    default=None,
+    type=click.Path(),
+    help="Run this file instead of the session graph.",
+)
 @click.option("--timeout", default=1800, show_default=True, type=int)
 @click.option("--front", is_flag=True, default=False, help="Jump the queue.")
 @click.option("--download", "dest", default=None, help="Download the outputs into this directory.")
@@ -465,18 +540,23 @@ def run_cmd(ctx, path, timeout, front, dest, json_):
     _autosave(ctx, st)
     if dest and res["outputs"]:
         res["download"] = run_core.fetch(c, res["outputs"], dest)
-    lines = [f"prompt {res['prompt_id']} finished in {res['elapsed_s']}s — "
-             f"{res['output_count']} output file(s)"]
+    lines = [
+        f"prompt {res['prompt_id']} finished in {res['elapsed_s']}s — "
+        f"{res['output_count']} output file(s)"
+    ]
     for f in res["outputs"][:10]:
         lines.append(f"  [{f['bucket']}] {f['filename']}")
     if res["output_count"] == 0:
         lines.append("  WARNING: nothing was produced — does the graph have an output node?")
     if res.get("download"):
-        lines.append(f"  downloaded {res['download']['downloaded']} file(s) to {res['download']['dir']}")
+        lines.append(
+            f"  downloaded {res['download']['downloaded']} file(s) to {res['download']['dir']}"
+        )
     emit(ctx, res, lines)
 
 
 # ----------------------------------------------------------------- queue/history
+
 
 @cli.group()
 def queue():
@@ -494,13 +574,23 @@ def queue_list(ctx, json_):
     except ComfyError as exc:
         die(str(exc))
     running = [{"prompt_id": r[1]} for r in (q.get("queue_running") or []) if len(r) > 1]
-    pending = [{"prompt_id": r[1], "position": i + 1}
-               for i, r in enumerate(q.get("queue_pending") or []) if len(r) > 1]
-    emit(ctx, {"running": running, "pending": pending,
-               "running_count": len(running), "pending_count": len(pending)},
-         [f"{len(running)} running, {len(pending)} pending"] +
-         [f"  running  {r['prompt_id']}" for r in running] +
-         [f"  #{p['position']:<3d}     {p['prompt_id']}" for p in pending[:10]])
+    pending = [
+        {"prompt_id": r[1], "position": i + 1}
+        for i, r in enumerate(q.get("queue_pending") or [])
+        if len(r) > 1
+    ]
+    emit(
+        ctx,
+        {
+            "running": running,
+            "pending": pending,
+            "running_count": len(running),
+            "pending_count": len(pending),
+        },
+        [f"{len(running)} running, {len(pending)} pending"]
+        + [f"  running  {r['prompt_id']}" for r in running]
+        + [f"  #{p['position']:<3d}     {p['prompt_id']}" for p in pending[:10]],
+    )
 
 
 @queue.command("cancel")
@@ -544,12 +634,20 @@ def history_list(ctx, limit, json_):
         h = client(ctx).history(max_items=limit)
     except ComfyError as exc:
         die(str(exc))
-    rows = [{"prompt_id": pid, "outputs": len(outputs_of(entry)),
-             "status": ((entry.get("status") or {}).get("status_str") or "")}
-            for pid, entry in (h or {}).items()]
-    emit(ctx, {"count": len(rows), "prompts": rows},
-         [f"{len(rows)} prompt(s)"] +
-         [f"  {r['prompt_id']}  {r['outputs']:>3d} file(s)  {r['status']}" for r in rows])
+    rows = [
+        {
+            "prompt_id": pid,
+            "outputs": len(outputs_of(entry)),
+            "status": ((entry.get("status") or {}).get("status_str") or ""),
+        }
+        for pid, entry in (h or {}).items()
+    ]
+    emit(
+        ctx,
+        {"count": len(rows), "prompts": rows},
+        [f"{len(rows)} prompt(s)"]
+        + [f"  {r['prompt_id']}  {r['outputs']:>3d} file(s)  {r['status']}" for r in rows],
+    )
 
 
 @history.command("outputs")
@@ -574,14 +672,18 @@ def history_outputs(ctx, prompt_id, dest, json_):
     payload = {"prompt_id": pid, "output_count": len(files), "outputs": files}
     if dest and files:
         payload["download"] = run_core.fetch(c, files, dest)
-    lines = [f"prompt {pid}: {len(files)} file(s)"] + \
-            [f"  [{f['bucket']}] {f['filename']}" for f in files[:20]]
+    lines = [f"prompt {pid}: {len(files)} file(s)"] + [
+        f"  [{f['bucket']}] {f['filename']}" for f in files[:20]
+    ]
     if payload.get("download"):
-        lines.append(f"  downloaded {payload['download']['downloaded']} to {payload['download']['dir']}")
+        lines.append(
+            f"  downloaded {payload['download']['downloaded']} to {payload['download']['dir']}"
+        )
     emit(ctx, payload, lines)
 
 
 # ---------------------------------------------------------------------- assets
+
 
 @cli.group()
 def assets():
@@ -600,8 +702,12 @@ def assets_upload(ctx, path, subfolder, json_):
         res = client(ctx).upload_image(path, subfolder=subfolder)
     except ComfyError as exc:
         die(str(exc))
-    emit(ctx, res, f"uploaded as {res.get('name')}" +
-         (f" in {res.get('subfolder')}" if res.get("subfolder") else ""))
+    emit(
+        ctx,
+        res,
+        f"uploaded as {res.get('name')}"
+        + (f" in {res.get('subfolder')}" if res.get("subfolder") else ""),
+    )
 
 
 @assets.command("download")
@@ -623,6 +729,7 @@ def assets_download(ctx, filename, dest, subfolder, kind, json_):
 
 # ---------------------------------------------------------------------- models
 
+
 @cli.command("models")
 @click.argument("folder", required=False)
 @click.option("--limit", default=30, show_default=True, type=int)
@@ -636,12 +743,16 @@ def models_cmd(ctx, folder, limit, json_):
     except ComfyError as exc:
         die(str(exc))
     items = data if isinstance(data, list) else list(data)
-    emit(ctx, {"folder": folder, "count": len(items), "items": items[:limit]},
-         [f"{len(items)} item(s)" + (f" in {folder}" if folder else " (folders)")] +
-         [f"  {i}" for i in items[:limit]])
+    emit(
+        ctx,
+        {"folder": folder, "count": len(items), "items": items[:limit]},
+        [f"{len(items)} item(s)" + (f" in {folder}" if folder else " (folders)")]
+        + [f"  {i}" for i in items[:limit]],
+    )
 
 
 # ----------------------------------------------------------------------- traps
+
 
 @cli.command("traps")
 @click.option("--id", "trap_id", default=None, help="Show one trap in full.")
@@ -660,15 +771,27 @@ def traps_cmd(ctx, trap_id, json_):
         if not hit:
             die(f"no trap {trap_id!r}. Known: {', '.join(t['id'] for t in traps)}")
         t = hit[0]
-        emit(ctx, t, [f"{t['id']}  [{t['severity']}]", f"  what: {t['what']}",
-                      f"  why:  {t['why']}", f"  fix:  {t['fix']}"])
+        emit(
+            ctx,
+            t,
+            [
+                f"{t['id']}  [{t['severity']}]",
+                f"  what: {t['what']}",
+                f"  why:  {t['why']}",
+                f"  fix:  {t['fix']}",
+            ],
+        )
         return
-    emit(ctx, {"count": len(traps), "traps": traps},
-         [f"{len(traps)} recorded traps"] +
-         [f"  {t['id']:28s} [{t['severity']:7s}] {t['what'][:70]}" for t in traps])
+    emit(
+        ctx,
+        {"count": len(traps), "traps": traps},
+        [f"{len(traps)} recorded traps"]
+        + [f"  {t['id']:28s} [{t['severity']:7s}] {t['what'][:70]}" for t in traps],
+    )
 
 
 # ---------------------------------------------------------------------- session
+
 
 @cli.command("status")
 @json_option
@@ -681,13 +804,20 @@ def status_cmd(ctx, json_):
     c = client(ctx)
     s["url"] = s["url"] or c.url
     s["server_up"] = c.is_up()
-    emit(ctx, s, [f"server:   {s['url']}  ({'up' if s['server_up'] else 'DOWN'})",
-                  f"workflow: {s['workflow_source'] or '(none)'}  [{s['nodes']} nodes]",
-                  f"last run: {s['last_prompt_id'] or '(none)'}",
-                  f"session:  {s['path']}"])
+    emit(
+        ctx,
+        s,
+        [
+            f"server:   {s['url']}  ({'up' if s['server_up'] else 'DOWN'})",
+            f"workflow: {s['workflow_source'] or '(none)'}  [{s['nodes']} nodes]",
+            f"last run: {s['last_prompt_id'] or '(none)'}",
+            f"session:  {s['path']}",
+        ],
+    )
 
 
 # ------------------------------------------------------------------------- repl
+
 
 @cli.command("repl")
 @click.pass_context
@@ -698,16 +828,27 @@ def repl(ctx):
     skin = ReplSkin("comfyui", version=__version__)
     skin.print_banner()
     pt = skin.create_prompt_session()
-    commands = {"status": "session + server state", "server": "status / free / interrupt",
-                "nodes": "list / search / schema", "workflow": "convert / deps / info / find / set / validate",
-                "run": "queue the loaded graph and wait", "queue": "list / cancel / clear",
-                "history": "list / outputs", "assets": "upload / download",
-                "models": "installed models", "traps": "recorded failure modes",
-                "help": "this list", "exit": "leave"}
+    commands = {
+        "status": "session + server state",
+        "server": "status / free / interrupt",
+        "nodes": "list / search / schema",
+        "workflow": "convert / deps / info / find / set / validate",
+        "run": "queue the loaded graph and wait",
+        "queue": "list / cancel / clear",
+        "history": "list / outputs",
+        "assets": "upload / download",
+        "models": "installed models",
+        "traps": "recorded failure modes",
+        "help": "this list",
+        "exit": "leave",
+    }
     while True:
         try:
-            line = skin.get_input(pt, project_name=os.path.basename(
-                _state(ctx).get("workflow_source") or "no-workflow"), modified=False)
+            line = skin.get_input(
+                pt,
+                project_name=os.path.basename(_state(ctx).get("workflow_source") or "no-workflow"),
+                modified=False,
+            )
         except (EOFError, KeyboardInterrupt):
             break
         line = (line or "").strip()
@@ -719,11 +860,15 @@ def repl(ctx):
             skin.help(commands)
             continue
         try:
-            cli.main(args=line.split(), prog_name="cli-anything-comfyui",
-                     standalone_mode=False, obj=dict(ctx.obj))
+            cli.main(
+                args=line.split(),
+                prog_name="cli-anything-comfyui",
+                standalone_mode=False,
+                obj=dict(ctx.obj),
+            )
         except SystemExit:
             pass
-        except Exception as exc:                       # noqa: BLE001 — REPL must survive
+        except Exception as exc:  # noqa: BLE001 — REPL must survive
             skin.error(str(exc))
     skin.print_goodbye()
 

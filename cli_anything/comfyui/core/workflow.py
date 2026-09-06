@@ -52,8 +52,11 @@ def subgraph_defs(ui):
     exist, so it is named separately.
     """
     defs = (ui.get("definitions") or {}).get("subgraphs") or []
-    return {str(d.get("id")): d.get("name") or "unnamed subgraph"
-            for d in defs if isinstance(d, dict) and d.get("id")}
+    return {
+        str(d.get("id")): d.get("name") or "unnamed subgraph"
+        for d in defs
+        if isinstance(d, dict) and d.get("id")
+    }
 
 
 class WorkflowError(ValueError):
@@ -79,8 +82,10 @@ def detect_format(data):
     """
     if isinstance(data, dict) and isinstance(data.get("nodes"), list):
         return "ui"
-    if isinstance(data, dict) and data and all(
-        isinstance(v, dict) and "class_type" in v for v in data.values()
+    if (
+        isinstance(data, dict)
+        and data
+        and all(isinstance(v, dict) and "class_type" in v for v in data.values())
     ):
         return "api"
     return "unknown"
@@ -90,7 +95,7 @@ def _is_widget(spec):
     """Whether this input spec is entered in the canvas rather than wired."""
     t = spec[0] if isinstance(spec, (list, tuple)) and spec else spec
     if isinstance(t, list):
-        return True               # COMBO — a dropdown of choices
+        return True  # COMBO — a dropdown of choices
     return t in WIDGET_SCALARS
 
 
@@ -128,7 +133,7 @@ def link_map(ui):
     for row in ui.get("links") or []:
         if isinstance(row, (list, tuple)) and len(row) >= 5:
             out[row[0]] = (str(row[1]), int(row[2]))
-        elif isinstance(row, dict) and "id" in row:      # newer schema variant
+        elif isinstance(row, dict) and "id" in row:  # newer schema variant
             out[row["id"]] = (str(row.get("origin_id")), int(row.get("origin_slot") or 0))
     return out
 
@@ -177,9 +182,16 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
         # SAME SHAPE as the conversion path. A caller reading
         # report["missing_node_types"] must not KeyError because the input
         # happened to be an API graph already — that turns a no-op into a crash.
-        return dict(ui), {"already_api": True, "dropped": [], "warnings": [],
-                          "missing_node_types": [], "missing": [], "subgraphs": [],
-                          "nodes_in": len(ui), "nodes_out": len(ui)}
+        return dict(ui), {
+            "already_api": True,
+            "dropped": [],
+            "warnings": [],
+            "missing_node_types": [],
+            "missing": [],
+            "subgraphs": [],
+            "nodes_in": len(ui),
+            "nodes_out": len(ui),
+        }
     if fmt != "ui":
         raise WorkflowError("not a ComfyUI workflow: no `nodes` list and no class_type map")
 
@@ -197,13 +209,23 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
             dropped.append({"node": nid, "class_type": ctype, "why": "canvas-only node"})
             continue
         if ctype in REROUTE_TYPES:
-            dropped.append({"node": nid, "class_type": ctype, "why": "reroute collapsed into its consumers"})
+            dropped.append(
+                {"node": nid, "class_type": ctype, "why": "reroute collapsed into its consumers"}
+            )
             continue
         if mode == MODE_BYPASSED:
-            dropped.append({"node": nid, "class_type": ctype, "why": "bypassed (mode 4); inputs pass through"})
+            dropped.append(
+                {"node": nid, "class_type": ctype, "why": "bypassed (mode 4); inputs pass through"}
+            )
             continue
         if mode == MODE_MUTED and not keep_muted:
-            dropped.append({"node": nid, "class_type": ctype, "why": "muted (mode 2); pass --keep-muted to include"})
+            dropped.append(
+                {
+                    "node": nid,
+                    "class_type": ctype,
+                    "why": "muted (mode 2); pass --keep-muted to include",
+                }
+            )
             continue
 
         schema = schema_inputs(object_info, ctype)
@@ -211,8 +233,9 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
             # Collected, not raised: one run must name EVERY missing type, or
             # installing packs becomes a guessing game one node at a time.
             if ctype in subgraphs:
-                unsupported.append({"node": nid, "class_type": ctype,
-                                    "name": subgraphs[ctype], "kind": "subgraph"})
+                unsupported.append(
+                    {"node": nid, "class_type": ctype, "name": subgraphs[ctype], "kind": "subgraph"}
+                )
             else:
                 missing.append({"node": nid, "class_type": ctype, "kind": "not installed"})
             continue
@@ -226,12 +249,19 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
                 continue
             src = links.get(lid)
             if src is None:
-                warnings.append({"node": nid, "input": name, "why": f"link {lid} has no origin — dropped"})
+                warnings.append(
+                    {"node": nid, "input": name, "why": f"link {lid} has no origin — dropped"}
+                )
                 continue
             resolved = _resolve_through_bypass(src[0], src[1], nodes_by_id, links)
             if resolved is None:
-                warnings.append({"node": nid, "input": name,
-                                 "why": "link resolves only to bypassed/reroute nodes with no source"})
+                warnings.append(
+                    {
+                        "node": nid,
+                        "input": name,
+                        "why": "link resolves only to bypassed/reroute nodes with no source",
+                    }
+                )
                 continue
             wired[name] = [resolved[0], resolved[1]]
 
@@ -251,7 +281,7 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
                     inputs[name] = values[cursor]
                 cursor += 1
                 if _has_control_after_generate(spec):
-                    cursor += 1        # swallow the phantom companion slot
+                    cursor += 1  # swallow the phantom companion slot
         if cursor < len(values):
             # Two innocent causes and one dangerous one: a FRONTEND-ONLY widget
             # the node's Python schema never declares (PixaromaPortraitLandscape
@@ -259,11 +289,16 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
             # or genuine version drift between the canvas and the installed pack.
             # The extra values are ignored — every NAMED input is still correct —
             # but it is reported because the third cause is worth knowing about.
-            warnings.append({"node": nid, "class_type": ctype,
-                             "extra_values": len(values) - cursor,
-                             "why": f"the canvas holds {len(values)} widget values but "
-                                    f"{ctype} declares {cursor}; the extras are ignored "
-                                    f"(frontend-only widget, or node-pack drift)"})
+            warnings.append(
+                {
+                    "node": nid,
+                    "class_type": ctype,
+                    "extra_values": len(values) - cursor,
+                    "why": f"the canvas holds {len(values)} widget values but "
+                    f"{ctype} declares {cursor}; the extras are ignored "
+                    f"(frontend-only widget, or node-pack drift)",
+                }
+            )
         inputs.update(wired)
         entry = {"class_type": ctype, "inputs": inputs}
         title = node.get("title")
@@ -276,14 +311,25 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
     for nid, entry in api.items():
         for name, val in list(entry["inputs"].items()):
             if isinstance(val, list) and len(val) == 2 and str(val[0]) not in live:
-                warnings.append({"node": nid, "input": name,
-                                 "why": f"wired to node {val[0]}, which is not in the graph — removed"})
+                warnings.append(
+                    {
+                        "node": nid,
+                        "input": name,
+                        "why": f"wired to node {val[0]}, which is not in the graph — removed",
+                    }
+                )
                 entry["inputs"].pop(name)
 
-    report = {"already_api": False, "dropped": dropped, "warnings": warnings,
-              "missing_node_types": sorted({m["class_type"] for m in missing}),
-              "missing": missing, "subgraphs": unsupported,
-              "nodes_in": len(nodes), "nodes_out": len(api)}
+    report = {
+        "already_api": False,
+        "dropped": dropped,
+        "warnings": warnings,
+        "missing_node_types": sorted({m["class_type"] for m in missing}),
+        "missing": missing,
+        "subgraphs": unsupported,
+        "nodes_in": len(nodes),
+        "nodes_out": len(api),
+    }
     if (missing or unsupported) and strict:
         lines = []
         if missing:
@@ -317,19 +363,39 @@ def validate(api, object_info):
             continue
         schema = schema_inputs(object_info, ctype)
         if schema is None:
-            problems.append({"node": nid, "class_type": ctype,
-                             "problem": "node type not installed on this ComfyUI"})
+            problems.append(
+                {
+                    "node": nid,
+                    "class_type": ctype,
+                    "problem": "node type not installed on this ComfyUI",
+                }
+            )
             continue
-        required = {n for n, s in (schema_inputs(object_info, ctype) or [])
-                    if n in ((object_info[ctype].get("input") or {}).get("required") or {})}
+        required = {
+            n
+            for n, s in (schema_inputs(object_info, ctype) or [])
+            if n in ((object_info[ctype].get("input") or {}).get("required") or {})
+        }
         given = set((entry.get("inputs") or {}))
         for miss in sorted(required - given):
-            problems.append({"node": nid, "class_type": ctype, "input": miss,
-                             "problem": "required input is missing"})
+            problems.append(
+                {
+                    "node": nid,
+                    "class_type": ctype,
+                    "input": miss,
+                    "problem": "required input is missing",
+                }
+            )
         for name, val in (entry.get("inputs") or {}).items():
             if isinstance(val, list) and len(val) == 2 and str(val[0]) not in api:
-                problems.append({"node": nid, "class_type": ctype, "input": name,
-                                 "problem": f"wired to node {val[0]}, which is not in the graph"})
+                problems.append(
+                    {
+                        "node": nid,
+                        "class_type": ctype,
+                        "input": name,
+                        "problem": f"wired to node {val[0]}, which is not in the graph",
+                    }
+                )
     return {"ok": not problems, "problems": problems, "nodes": len(api or {})}
 
 
@@ -364,6 +430,11 @@ def find_nodes(api, class_type=None, title=None):
             continue
         if title and (entry.get("_meta") or {}).get("title") != title:
             continue
-        hits.append({"node": nid, "class_type": entry.get("class_type"),
-                     "title": (entry.get("_meta") or {}).get("title")})
+        hits.append(
+            {
+                "node": nid,
+                "class_type": entry.get("class_type"),
+                "title": (entry.get("_meta") or {}).get("title"),
+            }
+        )
     return sorted(hits, key=lambda h: int(h["node"]) if h["node"].isdigit() else 0)

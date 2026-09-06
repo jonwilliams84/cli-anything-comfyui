@@ -1,0 +1,84 @@
+name: Release
+
+# Cut a semver release for whatever main declares. Fired by every push to main,
+# which includes converge's squash-merges (they use a PAT, so on:push runs).
+# The version of record is setup.py; `__version__` must agree or the release
+# is refused loudly — a package that reports one version while pip installs
+# another is a bug, not something to paper over here. A version that is
+# already tagged is skipped, so re-runs and non-bumping pushes are no-ops.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Read the version main declares
+        id: v
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import glob, re, sys
+          setup = open("setup.py", encoding="utf-8").read()
+          m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', setup, re.M)
+          if not m:
+              sys.exit("setup.py has no version=")
+          v = m.group(1)
+          if not re.fullmatch(r"\d+\.\d+\.\d+", v):
+              sys.exit(f"setup.py version {v!r} is not MAJOR.MINOR.PATCH")
+          for init in glob.glob("cli_anything/*/__init__.py"):
+              src = open(init, encoding="utf-8").read()
+              mm = re.search(r'^__version__\s*=\s*["\']([^"\']+)["\']', src, re.M)
+              if mm and mm.group(1) != v:
+                  sys.exit(f"{init} says {mm.group(1)!r} but setup.py says {v!r} — "
+                           "sync them (the converge runner does this automatically)")
+          print(f"version={v}")
+          PY
+
+      - name: Skip if already released
+        id: tag
+        run: |
+          if git rev-parse -q --verify "refs/tags/v${{ steps.v.outputs.version }}" >/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.v.outputs.version }} already tagged — nothing to cut"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Release notes from CHANGELOG
+        if: steps.tag.outputs.exists == 'false'
+        id: notes
+        run: |
+          python3 - <<'PY'
+          import os, re
+          v = "${{ steps.v.outputs.version }}"
+          notes = ""
+          if os.path.exists("CHANGELOG.md"):
+              text = open("CHANGELOG.md", encoding="utf-8").read()
+              m = re.search(r"^## \[?v?" + re.escape(v) + r"\]?[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+              if m:
+                  notes = m.group(1).strip()
+          open("RELEASE_NOTES.md", "w", encoding="utf-8").write(notes)
+          print("changelog section found" if notes else "no CHANGELOG section — GitHub will generate notes")
+          PY
+
+      - name: Create release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="v${{ steps.v.outputs.version }}"
+          if [ -s RELEASE_NOTES.md ]; then
+            gh release create "$V" --title "$V" --notes-file RELEASE_NOTES.md --target "$GITHUB_SHA"
+          else
+            gh release create "$V" --title "$V" --generate-notes --target "$GITHUB_SHA"
+          fi

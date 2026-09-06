@@ -1,0 +1,125 @@
+name: CI
+
+# Blocking gate. Unlike the advisory security scan, every step here is allowed
+# to fail the build - that is the point. A red job means the merge is blocked.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests + Coverage
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pytest pytest-cov
+      - name: Run tests with coverage
+        # UNIT TESTS ONLY, deliberately.
+        #
+        # test_full_e2e.py drives a REAL ComfyUI holding models in VRAM. A
+        # GitHub runner has no GPU and no ComfyUI, and neither does converge's
+        # build pod — the instance this harness targets runs on a Windows
+        # desktop reachable only from that machine's WSL. Those tests are not
+        # skipped when a server is missing (HARNESS.md forbids that, and they
+        # FAIL loudly); they are simply not invoked in an environment that
+        # structurally cannot host the dependency. Run them where the software
+        # actually is:
+        #
+        #   CLI_ANYTHING_FORCE_INSTALLED=1 pytest cli_anything/comfyui/tests -v -s
+        #
+        # The gate starts at 30% because the unit suite covers the CONVERTER
+        # thoroughly and comfyui_cli.py not at all. That is the honest number
+        # today and the obvious next piece of work, not a target to paper over.
+        run: |
+          python -m pytest cli_anything/comfyui/tests/test_core.py \
+            --cov=cli_anything --cov-report=term-missing \
+            --cov-report=xml --cov-fail-under=30 \
+            -q --durations=10
+      - name: Upload coverage
+        if: always() && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  lint:
+    name: Ruff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install ruff
+        run: pip install ruff
+      - name: Lint (blocking rules)
+        # Rule selection lives in pyproject.toml [tool.ruff]. Correctness and
+        # security rules block here; opinionated style is advisory and reported
+        # by the security-scan workflow instead of failing the build.
+        run: ruff check cli_anything/ --output-format=github
+      - name: Format check
+        run: ruff format --check --diff cli_anything/
+
+  bandit:
+    name: Bandit (blocking, medium+)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install bandit
+        run: pip install bandit
+      - name: Scan production code
+        # -ll  => report MEDIUM and above only, and exit non-zero on a hit.
+        # Tests are excluded: B101 (assert_used) fires on every assert in a test
+        # suite, which is what test suites are made of - 1173 of one repo's 1233
+        # findings were test asserts, drowning the one real MEDIUM.
+        run: |
+          bandit -r cli_anything/ -ll \
+            -x '*/tests/*,*/test_*.py,*/conftest.py'
+
+  ci-ok:
+    name: CI OK
+    runs-on: ubuntu-latest
+    needs: [test, lint, bandit]
+    if: always()
+    steps:
+      - name: Verify all gates passed
+        # Single required status check for branch protection: it fails if ANY
+        # upstream job failed or was skipped, so adding a job to the gate never
+        # requires touching the protection rule.
+        run: |
+          echo "test=${{ needs.test.result }}"
+          echo "lint=${{ needs.lint.result }}"
+          echo "bandit=${{ needs.bandit.result }}"
+          if [ "${{ needs.test.result }}" != "success" ] \
+            || [ "${{ needs.lint.result }}" != "success" ] \
+            || [ "${{ needs.bandit.result }}" != "success" ]; then
+            echo "::error::One or more CI gates failed"
+            exit 1
+          fi
+          echo "All gates green"

@@ -48,7 +48,8 @@ def client():
         pytest.fail(
             f"No ComfyUI at {c.url}. These tests drive the REAL software and do not "
             f"skip — start ComfyUI (Desktop, or python main.py --listen 0.0.0.0) or "
-            f"set COMFYUI_URL.")
+            f"set COMFYUI_URL."
+        )
     return c
 
 
@@ -59,12 +60,15 @@ def object_info(client):
 
 # ----------------------------------------------------------------- the server
 
+
 def test_the_server_reports_a_version_and_a_device(client):
     s = client.system_stats()
     assert s["system"]["comfyui_version"]
     assert s["devices"], "no compute device — ComfyUI cannot render"
-    print(f"\n  ComfyUI {s['system']['comfyui_version']} on {s['system']['os']}, "
-          f"{len(s['devices'])} device(s)")
+    print(
+        f"\n  ComfyUI {s['system']['comfyui_version']} on {s['system']['os']}, "
+        f"{len(s['devices'])} device(s)"
+    )
 
 
 def test_object_info_is_populated_and_ksampler_carries_the_flag(object_info):
@@ -72,8 +76,9 @@ def test_object_info_is_populated_and_ksampler_carries_the_flag(object_info):
     assert len(object_info) > 100, f"only {len(object_info)} node types — is this ComfyUI healthy?"
     assert "KSampler" in object_info
     seed = object_info["KSampler"]["input"]["required"]["seed"]
-    assert wf._has_control_after_generate(seed), \
+    assert wf._has_control_after_generate(seed), (
         "KSampler.seed no longer declares control_after_generate — the converter's core assumption"
+    )
     print(f"\n  {len(object_info)} node types installed")
 
 
@@ -82,6 +87,7 @@ def test_free_vram_returns_cleanly(client):
 
 
 # ------------------------------------------------- the real 48-canvas corpus
+
 
 @pytest.mark.skipif(not os.path.isdir(CORPUS), reason="archived canvas corpus not mounted")
 def test_every_archived_canvas_converts_or_explains_itself(object_info):
@@ -95,7 +101,7 @@ def test_every_archived_canvas_converts_or_explains_itself(object_info):
     outcomes = {"clean": 0, "needs_packs": 0, "subgraph": 0, "already_api": 0}
     for f in files:
         ui = wf.load(f)
-        api, rep = wf.to_api(ui, object_info, strict=False)   # must not raise
+        api, rep = wf.to_api(ui, object_info, strict=False)  # must not raise
         if rep["already_api"]:
             outcomes["already_api"] += 1
         elif rep["missing_node_types"]:
@@ -111,16 +117,21 @@ def test_every_archived_canvas_converts_or_explains_itself(object_info):
 
 # ------------------------------------------------------------- a real render
 
+
 def _minimal_graph(object_info):
     """The smallest graph that writes a file using nodes this box actually has."""
     for req in ("EmptyImage", "SaveImage"):
         if req not in object_info:
             pytest.fail(f"{req} is not installed — cannot build a minimal render")
     return {
-        "1": {"class_type": "EmptyImage",
-              "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}},
-        "2": {"class_type": "SaveImage",
-              "inputs": {"images": ["1", 0], "filename_prefix": "cli_anything_e2e"}},
+        "1": {
+            "class_type": "EmptyImage",
+            "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+        },
+        "2": {
+            "class_type": "SaveImage",
+            "inputs": {"images": ["1", 0], "filename_prefix": "cli_anything_e2e"},
+        },
     }
 
 
@@ -153,8 +164,12 @@ def test_the_queue_is_readable_and_history_carries_the_prompt(client, object_inf
 
 def test_a_graph_with_no_output_node_is_identified_before_it_wastes_a_render(object_info):
     """The quietest failure in ComfyUI: it runs, succeeds, and writes nothing."""
-    graph = {"1": {"class_type": "EmptyImage",
-                   "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}}}
+    graph = {
+        "1": {
+            "class_type": "EmptyImage",
+            "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+        }
+    }
     assert wf.outputs(graph, object_info) == []
 
 
@@ -170,14 +185,16 @@ def test_upload_then_download_round_trips(client, object_info, tmp_path):
 
 # --------------------------------------------------------- the installed CLI
 
+
 class TestCLISubprocess:
     """The command as a user or agent actually invokes it. No cwd is set."""
 
     CLI_BASE = _resolve_cli("cli-anything-comfyui")
 
     def _run(self, args, check=True):
-        proc = subprocess.run(self.CLI_BASE + args, capture_output=True, text=True,
-                              timeout=600, check=False)
+        proc = subprocess.run(
+            self.CLI_BASE + args, capture_output=True, text=True, timeout=600, check=False
+        )
         if check:
             assert proc.returncode == 0, f"{args} -> {proc.returncode}\n{proc.stderr[-2000:]}"
         return proc
@@ -219,8 +236,11 @@ class TestCLISubprocess:
             pytest.skip("that canvas is not in the corpus")
         sess = str(tmp_path / "s.json")
         out = str(tmp_path / "api.json")
-        d = json.loads(self._run(["--json", "--session", sess, "workflow", "convert",
-                                  canvas, "-o", out]).stdout)
+        d = json.loads(
+            self._run(
+                ["--json", "--session", sess, "workflow", "convert", canvas, "-o", out]
+            ).stdout
+        )
         assert d["nodes"] > 0 and os.path.exists(out)
         info = json.loads(self._run(["--json", "--session", sess, "workflow", "info"]).stdout)
         assert info["output_nodes"], "a real canvas with no output node?"
@@ -230,10 +250,19 @@ class TestCLISubprocess:
         sess = str(tmp_path / "s.json")
         graph = str(tmp_path / "g.json")
         with open(graph, "w", encoding="utf-8") as fh:
-            json.dump({"1": {"class_type": "EmptyImage",
-                             "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}},
-                       "2": {"class_type": "SaveImage",
-                             "inputs": {"images": ["1", 0], "filename_prefix": "cli_e2e_sub"}}}, fh)
+            json.dump(
+                {
+                    "1": {
+                        "class_type": "EmptyImage",
+                        "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                    },
+                    "2": {
+                        "class_type": "SaveImage",
+                        "inputs": {"images": ["1", 0], "filename_prefix": "cli_e2e_sub"},
+                    },
+                },
+                fh,
+            )
         self._run(["--json", "--session", sess, "workflow", "convert", graph])
         self._run(["--json", "--session", sess, "workflow", "set", "1", "width", "96"])
         v = json.loads(self._run(["--json", "--session", sess, "workflow", "validate"]).stdout)
@@ -251,16 +280,35 @@ class TestCLISubprocess:
         sess = str(tmp_path / "s.json")
         graph = str(tmp_path / "g.json")
         with open(graph, "w", encoding="utf-8") as fh:
-            json.dump({"1": {"class_type": "EmptyImage",
-                             "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0}}}, fh)
+            json.dump(
+                {
+                    "1": {
+                        "class_type": "EmptyImage",
+                        "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                    }
+                },
+                fh,
+            )
         self._run(["--json", "--dry-run", "--session", sess, "workflow", "convert", graph])
         assert not os.path.exists(sess), "--dry-run wrote the session anyway"
 
     def test_a_missing_node_type_fails_loudly(self, tmp_path):
         graph = str(tmp_path / "bad.json")
         with open(graph, "w", encoding="utf-8") as fh:
-            json.dump({"nodes": [{"id": 1, "type": "DefinitelyNotInstalled",
-                                  "widgets_values": [], "inputs": []}], "links": []}, fh)
+            json.dump(
+                {
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "type": "DefinitelyNotInstalled",
+                            "widgets_values": [],
+                            "inputs": [],
+                        }
+                    ],
+                    "links": [],
+                },
+                fh,
+            )
         proc = self._run(["workflow", "convert", graph], check=False)
         assert proc.returncode != 0
         assert "DefinitelyNotInstalled" in (proc.stdout + proc.stderr)

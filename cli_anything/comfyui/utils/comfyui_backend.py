@@ -30,6 +30,22 @@ DEFAULT_URL = os.environ.get("COMFYUI_URL", "http://127.0.0.1:8188")
 DEFAULT_TIMEOUT = float(os.environ.get("COMFYUI_TIMEOUT", "60"))
 
 
+def _http_only(url):
+    """Accept http/https and nothing else.
+
+    The URL arrives from `--url`, `$COMFYUI_URL` or a session file, and every
+    request below goes through `urllib.request.urlopen`, which will happily open
+    `file:///etc/passwd` if asked. Pinning the scheme here closes that at the one
+    place a URL enters the object.
+    """
+    parsed = urllib.parse.urlsplit((url or "").rstrip("/"))
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError(
+            f"ComfyUI URL must be http:// or https://, got {url!r}. Example: http://127.0.0.1:8188"
+        )
+    return (url or "").rstrip("/")
+
+
 class ComfyError(RuntimeError):
     """Any failure that came back from the server itself."""
 
@@ -39,9 +55,7 @@ class ComfyUnavailable(ComfyError):
 
     def __init__(self, url, cause=""):
         super().__init__(
-            f"No ComfyUI at {url}"
-            + (f" ({cause})" if cause else "")
-            + ".\n"
+            f"No ComfyUI at {url}" + (f" ({cause})" if cause else "") + ".\n"
             "Start it, then retry:\n"
             "  Desktop app, or:  python main.py --listen 0.0.0.0 --port 8188\n"
             "If it runs on another host or port, set COMFYUI_URL "
@@ -89,7 +103,7 @@ class ComfyUI:
     """
 
     def __init__(self, url=DEFAULT_URL, timeout=DEFAULT_TIMEOUT, client_id=None):
-        self.url = (url or DEFAULT_URL).rstrip("/")
+        self.url = _http_only(url or DEFAULT_URL)
         self.timeout = float(timeout)
         self.client_id = client_id or str(uuid.uuid4())
 
@@ -104,9 +118,13 @@ class ComfyUI:
             hdr.setdefault("Content-Type", "application/json")
         elif data is not None:
             body = data
-        req = urllib.request.Request(url, body, hdr, method=method)
+        req = urllib.request.Request(url, body, hdr, method=method)  # noqa: S310
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
+            # S310/B310: the scheme is pinned to http/https by _http_only()
+            # when the client is constructed, so `file:` and custom schemes
+            # cannot reach here.
+            opened = urllib.request.urlopen(req, timeout=timeout or self.timeout)  # noqa: S310
+            with opened as r:
                 payload = r.read()
         except urllib.error.HTTPError as exc:
             detail = exc.read()
@@ -142,7 +160,9 @@ class ComfyUI:
         return self._request("GET", path, timeout=max(self.timeout, 120))
 
     def models(self, folder=None):
-        return self._request("GET", f"/models/{urllib.parse.quote(folder)}" if folder else "/models")
+        return self._request(
+            "GET", f"/models/{urllib.parse.quote(folder)}" if folder else "/models"
+        )
 
     def embeddings(self):
         return self._request("GET", "/embeddings")
@@ -187,8 +207,11 @@ class ComfyUI:
         The OOM lever. A long windowed render that never calls this is the
         documented way to make ComfyUI die between windows.
         """
-        self._request("POST", "/free",
-                      {"unload_models": bool(unload_models), "free_memory": bool(free_memory)})
+        self._request(
+            "POST",
+            "/free",
+            {"unload_models": bool(unload_models), "free_memory": bool(free_memory)},
+        )
         return {"unload_models": bool(unload_models), "free_memory": bool(free_memory)}
 
     def clear_queue(self):
@@ -212,20 +235,32 @@ class ComfyUI:
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         boundary = f"----comfycli{uuid.uuid4().hex}"
         parts = []
-        for key, val in (("subfolder", subfolder), ("overwrite", "true" if overwrite else "false"),
-                         ("type", kind)):
+        for key, val in (
+            ("subfolder", subfolder),
+            ("overwrite", "true" if overwrite else "false"),
+            ("type", kind),
+        ):
             if val == "":
                 continue
-            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{val}\r\n".encode())
+            parts.append(
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{val}\r\n'.encode()
+            )
         with open(path, "rb") as fh:
             blob = fh.read()
         parts.append(
-            f"--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; "
-            f"filename=\"{name}\"\r\nContent-Type: {ctype}\r\n\r\n".encode() + blob + b"\r\n")
+            f'--{boundary}\r\nContent-Disposition: form-data; name="image"; '
+            f'filename="{name}"\r\nContent-Type: {ctype}\r\n\r\n'.encode()
+            + blob
+            + b"\r\n"
+        )
         parts.append(f"--{boundary}--\r\n".encode())
-        return self._request("POST", "/upload/image", b"".join(parts),
-                             {"Content-Type": f"multipart/form-data; boundary={boundary}"},
-                             timeout=max(self.timeout, 300))
+        return self._request(
+            "POST",
+            "/upload/image",
+            b"".join(parts),
+            {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            timeout=max(self.timeout, 300),
+        )
 
     def view(self, filename, subfolder="", kind="output"):
         """Raw bytes of one produced file."""
@@ -255,23 +290,30 @@ class ComfyUI:
             hist = self.history(prompt_id)
             entry = hist.get(prompt_id) if isinstance(hist, dict) else None
             if entry:
-                status = (entry.get("status") or {})
-                return {"prompt_id": prompt_id, "history": entry,
-                        "completed": bool(status.get("completed", True)),
-                        "status": status.get("status_str") or "",
-                        "waited_s": round(time.time() - started, 2)}
+                status = entry.get("status") or {}
+                return {
+                    "prompt_id": prompt_id,
+                    "history": entry,
+                    "completed": bool(status.get("completed", True)),
+                    "status": status.get("status_str") or "",
+                    "waited_s": round(time.time() - started, 2),
+                }
             if time.time() - started > timeout:
                 raise ComfyError(
                     f"prompt {prompt_id} still not finished after {timeout}s. "
                     "It may still be running — check `queue list`, and raise --timeout "
-                    "for long video renders.")
+                    "for long video renders."
+                )
             if on_tick:
                 q = self.queue()
                 running = [r for r in (q.get("queue_running") or []) if _qid(r) == prompt_id]
-                pending = [r for r in (q.get("queue_pending") or []) if _qid(r) == prompt_id]
-                on_tick({"running": bool(running),
-                         "pending_position": _position(q, prompt_id),
-                         "waited_s": round(time.time() - started, 1)})
+                on_tick(
+                    {
+                        "running": bool(running),
+                        "pending_position": _position(q, prompt_id),
+                        "waited_s": round(time.time() - started, 1),
+                    }
+                )
             time.sleep(poll)
 
 
@@ -304,8 +346,13 @@ def outputs_of(history_entry):
                 continue
             for it in items:
                 if isinstance(it, dict) and it.get("filename"):
-                    files.append({"node_id": node_id, "bucket": kind,
-                                  "filename": it["filename"],
-                                  "subfolder": it.get("subfolder", ""),
-                                  "type": it.get("type", "output")})
+                    files.append(
+                        {
+                            "node_id": node_id,
+                            "bucket": kind,
+                            "filename": it["filename"],
+                            "subfolder": it.get("subfolder", ""),
+                            "type": it.get("type", "output"),
+                        }
+                    )
     return files

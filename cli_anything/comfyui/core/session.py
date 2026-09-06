@@ -19,7 +19,8 @@ import os
 import time
 
 DEFAULT_SESSION = os.path.expanduser(
-    os.environ.get("COMFYUI_SESSION", "~/.config/cli-anything-comfyui/session.json"))
+    os.environ.get("COMFYUI_SESSION", "~/.config/cli-anything-comfyui/session.json")
+)
 VERSION = 1
 
 
@@ -31,6 +32,7 @@ def _locked_save_json(path, data):
     between the two leaves nothing at all.
     """
     import fcntl
+
     path = os.path.abspath(os.path.expanduser(path))
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     if not os.path.exists(path):
@@ -50,10 +52,17 @@ def _locked_save_json(path, data):
 
 
 def new(url=None, path=None):
-    return {"_version": VERSION, "url": url or "", "workflow": None,
-            "workflow_source": "", "last_prompt_id": "", "output_dir": "",
-            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "modified": "", "_path": os.path.abspath(os.path.expanduser(path or DEFAULT_SESSION))}
+    return {
+        "_version": VERSION,
+        "url": url or "",
+        "workflow": None,
+        "workflow_source": "",
+        "last_prompt_id": "",
+        "output_dir": "",
+        "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "modified": "",
+        "_path": os.path.abspath(os.path.expanduser(path or DEFAULT_SESSION)),
+    }
 
 
 def load(path=None, url=None):
@@ -89,8 +98,12 @@ def save(state, dry_run=False):
 
 def summary(state):
     wfl = state.get("workflow") or {}
-    return {"path": state.get("_path"), "url": state.get("url") or "",
-            "workflow_source": state.get("workflow_source") or "",
-            "nodes": len(wfl), "last_prompt_id": state.get("last_prompt_id") or "",
-            "output_dir": state.get("output_dir") or "",
-            "modified": state.get("modified") or ""}
+    return {
+        "path": state.get("_path"),
+        "url": state.get("url") or "",
+        "workflow_source": state.get("workflow_source") or "",
+        "nodes": len(wfl),
+        "last_prompt_id": state.get("last_prompt_id") or "",
+        "output_dir": state.get("output_dir") or "",
+        "modified": state.get("modified") or "",
+    }

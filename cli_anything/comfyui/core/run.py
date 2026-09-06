@@ -25,10 +25,15 @@ def submit_and_wait(client, api_graph, timeout=1800, poll=1.0, on_tick=None, fro
     done = client.wait(prompt_id, timeout=timeout, poll=poll, on_tick=on_tick)
     entry = done.get("history") or {}
     files = outputs_of(entry)
-    return {"prompt_id": prompt_id, "number": reply.get("number"),
-            "completed": done.get("completed"), "status": done.get("status"),
-            "elapsed_s": round(time.time() - started, 2),
-            "outputs": files, "output_count": len(files)}
+    return {
+        "prompt_id": prompt_id,
+        "number": reply.get("number"),
+        "completed": done.get("completed"),
+        "status": done.get("status"),
+        "elapsed_s": round(time.time() - started, 2),
+        "outputs": files,
+        "output_count": len(files),
+    }
 
 
 def fetch(client, files, dest_dir):
@@ -42,12 +47,17 @@ def fetch(client, files, dest_dir):
     got = []
     for f in files:
         target = os.path.join(dest_dir, f["filename"])
-        res = client.download(f["filename"], target, f.get("subfolder", ""), f.get("type", "output"))
+        client.download(f["filename"], target, f.get("subfolder", ""), f.get("type", "output"))
+        # Re-stat rather than trusting the download's own byte count: the check
+        # that matters is what is on THIS disk now.
         size = os.path.getsize(target) if os.path.exists(target) else 0
         got.append({**f, "path": target, "bytes": size, "ok": size > 0})
-    return {"dir": dest_dir, "files": got,
-            "downloaded": sum(1 for g in got if g["ok"]),
-            "empty": [g["path"] for g in got if not g["ok"]]}
+    return {
+        "dir": dest_dir,
+        "files": got,
+        "downloaded": sum(1 for g in got if g["ok"]),
+        "empty": [g["path"] for g in got if not g["ok"]],
+    }
 
 
 def run_windows(client, graphs, timeout=1800, free_between=True, on_window=None):
@@ -68,18 +78,27 @@ def run_windows(client, graphs, timeout=1800, free_between=True, on_window=None)
             res = submit_and_wait(client, graph, timeout=timeout)
             res["window"] = i
             res["ok"] = True
-        except Exception as exc:                      # noqa: BLE001 — reported, not swallowed
-            res = {"window": i, "ok": False, "error": f"{type(exc).__name__}: {exc}",
-                   "outputs": [], "output_count": 0}
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            res = {
+                "window": i,
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "outputs": [],
+                "output_count": 0,
+            }
         results.append(res)
         if on_window:
             on_window({**res, "label": label})
         if free_between and i < len(graphs) - 1:
             try:
                 client.free()
-            except Exception as exc:                  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 res.setdefault("warnings", []).append(f"free failed: {exc}")
     ok = [r for r in results if r.get("ok")]
-    return {"windows": len(graphs), "succeeded": len(ok), "failed": len(results) - len(ok),
-            "results": results,
-            "outputs": [f for r in ok for f in r.get("outputs", [])]}
+    return {
+        "windows": len(graphs),
+        "succeeded": len(ok),
+        "failed": len(results) - len(ok),
+        "results": results,
+        "outputs": [f for r in ok for f in r.get("outputs", [])],
+    }

@@ -1,0 +1,261 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  security-events: write
+  issues: write
+
+jobs:
+  pytest:
+    name: Tests + Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install and run tests with coverage
+        run: |
+          pip install -e . pytest pytest-cov
+          if [ -d tests ]; then
+            python3 -m pytest tests/ -q --cov=cli_anything --cov-report=term-missing --cov-report=xml
+          elif [ -d cli_anything ]; then
+            python3 -m pytest cli_anything/ -q --cov=cli_anything --cov-report=term-missing --cov-report=xml
+          else
+            echo "No tests found"
+          fi
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  ruff:
+    name: Ruff Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install ruff and lint
+        run: |
+          pip install ruff
+          # ADVISORY scope, deliberately WIDER than the blocking gate in ci.yml.
+          # Running bare `ruff check` here honours pyproject.toml, i.e. exactly the
+          # rules the gate already enforces - so this job reported 0 findings and
+          # the code-quality issue was empty by construction while ~430 deferred
+          # items per repo sat untracked. --select the deferred families explicitly
+          # so the backlog is visible without ever blocking a merge.
+          ruff check cli_anything/ --output-format=github || true
+          ruff check cli_anything/ \
+            --select B904,E402,E741,S110,S112,BLE001,UP,I001,SIM,RUF005,C4,PTH,RET,ARG,FURB,TRY \
+            --ignore RUF100 \
+            --output-format=json -o ruff.json || true
+      - name: Upload ruff artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ruff-report
+          path: ruff.json
+
+  bandit:
+    name: Bandit Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install bandit and scan
+        run: |
+          pip install bandit
+          # Exclude test files: bandit's B101 (assert_used) fires on every assert
+          # in a test suite, which is what tests are made of. Left in, it buried
+          # the genuine findings (1173 of 1233 findings in one repo were test
+          # asserts) and starved the findings window that converge dispatches on.
+          # Severity floor is deliberately NOT set - real LOW findings in prod
+          # code (try/except/pass, subprocess use) should still be reported.
+          BANDIT_EXCLUDE='*/tests/*,*/test_*.py,*/conftest.py'
+          if [ -d cli_anything ]; then
+            bandit -r cli_anything/ -x "$BANDIT_EXCLUDE" -f json -o bandit.json || true
+          else
+            bandit -r . -x "$BANDIT_EXCLUDE" -f json -o bandit.json || true
+          fi
+      - name: Convert bandit JSON to SARIF
+        run: |
+          python3 -c "
+          import json
+          with open('bandit.json') as f:
+              data = json.load(f)
+          seen_rules = set()
+          rules = []
+          results = []
+          for r in data.get('results', []):
+              rid = r.get('test_id', 'unknown')
+              if rid not in seen_rules:
+                  seen_rules.add(rid)
+                  rules.append({
+                      'id': rid,
+                      'shortDescription': {'text': r.get('test_name', rid)},
+                      'fullDescription': {'text': r.get('test_description', '')},
+                      'helpUri': r.get('issue_cwe', {}).get('link', '')
+                  })
+              sev = r.get('issue_severity', 'LOW')
+              level = 'error' if sev in ('HIGH', 'MEDIUM') else 'warning'
+              results.append({
+                  'ruleId': rid,
+                  'level': level,
+                  'message': {'text': r.get('issue_text', '')},
+                  'locations': [{
+                      'physicalLocation': {
+                          'artifactLocation': {'uri': r.get('filename', 'unknown')},
+                          'region': {'startLine': r.get('line_number', 0)}
+                      }
+                  }]
+              })
+          sarif = {
+              'version': '2.1.0',
+              'runs': [{
+                  'tool': {'driver': {'name': 'Bandit', 'rules': rules}},
+                  'results': results
+              }]
+          }
+          with open('bandit.sarif', 'w') as f:
+              json.dump(sarif, f, indent=2)
+          print(f'Converted {len(results)} bandit findings to SARIF')
+          "
+      - name: Upload bandit SARIF
+        uses: github/codeql-action/upload-sarif@v4.37.9
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+      - name: Upload bandit SARIF artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bandit-sarif
+          path: bandit.sarif
+
+  semgrep:
+    name: Semgrep Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install semgrep and scan
+        run: |
+          pip install semgrep
+          # --exclude tests for the same reason bandit does: test-file findings
+          # are noise that crowds real prod findings out of the reported window.
+          if [ -d cli_anything ]; then
+            semgrep scan --config p/python --exclude tests --exclude 'test_*.py' \
+              --sarif --output semgrep.sarif cli_anything/ || true
+          else
+            semgrep scan --config p/python --exclude tests --exclude 'test_*.py' \
+              --sarif --output semgrep.sarif . || true
+          fi
+      - name: Upload semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v4.37.9
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+      - name: Upload semgrep SARIF artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+
+  pip-audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install pip-audit and scan dependencies
+        run: |
+          pip install -e . pip-audit
+          pip-audit -f json -o pip-audit.json || true
+      - name: Convert pip-audit JSON to SARIF
+        run: |
+          python3 -c "
+          import json
+          with open('pip-audit.json') as f:
+              data = json.load(f)
+          rules = []
+          results = []
+          seen = set()
+          for dep in data.get('dependencies', []):
+              for vuln in dep.get('vulns', []):
+                  vid = vuln.get('id', 'unknown')
+                  if vid not in seen:
+                      seen.add(vid)
+                      rules.append({
+                          'id': vid,
+                          'shortDescription': {'text': vuln.get('description', '')[:200]},
+                      })
+                  results.append({
+                      'ruleId': vid,
+                      'level': 'error',
+                      'message': {'text': f\"{dep.get('name','?')} {dep.get('version','?')}: {vuln.get('description','')[:300]}\"},
+                      'locations': [{
+                          'physicalLocation': {
+                              'artifactLocation': {'uri': 'setup.py'},
+                              'region': {'startLine': 1}
+                          }
+                      }]
+                  })
+          sarif = {
+              'version': '2.1.0',
+              'runs': [{
+                  'tool': {'driver': {'name': 'pip-audit', 'rules': rules}},
+                  'results': results
+              }]
+          }
+          with open('pip-audit.sarif', 'w') as f:
+              json.dump(sarif, f, indent=2)
+          print(f'Converted {len(results)} pip-audit findings to SARIF')
+          "
+      - name: Upload pip-audit SARIF
+        uses: github/codeql-action/upload-sarif@v4.37.9
+        with:
+          sarif_file: pip-audit.sarif
+          category: pip-audit
+      - name: Upload pip-audit artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pip-audit-report
+          path: pip-audit.json
+
+  findings-summary:
+    name: Findings Summary
+    runs-on: ubuntu-latest
+    needs: [bandit, semgrep, pip-audit, ruff, pytest]
+    steps:
+      - uses: actions/checkout@v7
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "*-sarif"
+          merge-multiple: true
+      - name: Download ruff report
+        uses: actions/download-artifact@v8
+        with:
+          name: ruff-report
+      - name: Download coverage report
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-report
+      - name: Generate findings summary and update issues
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The publisher lives in .github/scripts/publish_findings.py rather than
+        # inline here. Inline YAML python cannot be linted, tested or reviewed -
+        # which is how a body claiming "sorted by severity" shipped while doing no
+        # sorting at all, and how every gh failure was swallowed by check=False.
+        run: python .github/scripts/publish_findings.py

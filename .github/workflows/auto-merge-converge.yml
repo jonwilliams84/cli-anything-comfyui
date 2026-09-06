@@ -1,0 +1,49 @@
+name: Auto-merge converge PRs
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, closed]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    name: Enable auto-merge
+    runs-on: ubuntu-latest
+    if: github.event.action != 'closed' && startsWith(github.head_ref, 'converge/auto-')
+    steps:
+      - name: Enable auto-merge (squash)
+        # PAT, not GITHUB_TOKEN: auto-merge is attributed to whoever enabled it,
+        # and a merge attributed to GITHUB_TOKEN triggers NOTHING downstream
+        # (GitHub's loop-prevention rule) - no on:push run for security-scan, and
+        # not even a pull_request:closed event. That left the security-findings
+        # issue stale after every converge merge, so the overnight cron kept
+        # re-dispatching already-fixed findings (seen live on cli-anything-alexa
+        # PR #24 -> a wasted build at 18:05 on 2026-07-24). With a PAT the merge
+        # is a normal user push and the scan cascade works as intended.
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh pr merge ${{ github.event.pull_request.number }} \
+            --repo ${{ github.repository }} \
+            --squash --auto --delete-branch
+
+  rescan-on-merge:
+    name: Trigger security rescan
+    runs-on: ubuntu-latest
+    # Belt-and-braces for the MANUAL-merge path. The auto-merge job above now
+    # uses a PAT, so its merge fires security-scan's on:push by itself; this
+    # job covers a PR a human merges by hand, and is harmless (a duplicate
+    # scan just rewrites the same issue) if both paths ever fire.
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && startsWith(github.head_ref, 'converge/auto-')
+    steps:
+      - name: Dispatch security-scan.yml
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          gh workflow run security-scan.yml \
+            --repo ${{ github.repository }} \
+            --ref main

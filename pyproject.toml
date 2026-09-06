@@ -1,0 +1,127 @@
+# Tool configuration for cli-anything-comfyui.
+#
+# This file exists so the linter, test runner and coverage rules live in ONE
+# place instead of being spelled out as CLI flags inside workflow YAML (where
+# they drifted between repos and could not be reproduced locally).
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = [".venv", "build", "dist"]
+
+[tool.ruff.lint]
+# Deliberately curated. These are the rules that catch BUGS and SECURITY issues,
+# and they are allowed to fail the build in ci.yml.
+#
+# Opinionated style rules (UP045/UP007 union rewrites, I001 import sorting,
+# SIM1xx simplifications, BLE001 blind-except) are intentionally absent: they
+# made up ~96% of what a `security-findings` issue was reporting, which starved
+# the automated fix loop of real work. They are surfaced as advisory output by
+# the security-scan workflow instead.
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes - undefined names, unused imports
+    "S",      # flake8-bandit - security
+    "B",      # flake8-bugbear - likely bugs
+    "DTZ",    # naive datetime use - real bug class here
+    "ASYNC",  # async antipatterns
+    "RUF",    # ruff-specific correctness
+]
+ignore = [
+    "E501",    # line length - the formatter owns this
+    "E701",    # multiple statements on one line (colon) - formatting, and
+    "E702",    # multiple statements on one line (semicolon) - `ruff format
+               # --check` in the lint job already enforces layout. Selecting
+               # these blocked on 241 hits in one repo, nearly all in tests.
+    "B008",    # function call in argument default - required by click/typer
+    "RUF012",  # mutable class attrs needing ClassVar - noisy on config dataclasses
+    "RUF001",  # ambiguous unicode in strings - these are deliberate box-drawing
+    "RUF002",  # and typographic characters in the REPL skins and help text
+    "RUF003",
+    # --- deferred to the advisory lane, NOT waived ---
+    # B904 (raise ... from err) is 82 mechanical edits in one repo. The error
+    # MESSAGE is already preserved in every case (`raise ClickException(str(e))`),
+    # so only the __cause__ chain is lost - worth fixing, not worth blocking the
+    # gate's rollout on. Tracked in the code-quality issue for converge to grind.
+    "B904",
+    "E402",   # module import not at top - deliberate in lazy-import CLI paths
+    "E741",   # ambiguous name `l` - cosmetic
+    "RUF043", # pytest.raises match= treated as regex - test-only nit
+    "B017",   # assertRaises(Exception) - test-only
+    "RUF059", # unused unpacked var
+    "B007",   # unused loop var
+    "RUF034", # useless if-else
+    "B018",   # useless expression
+    "S105",   # hardcoded string that looks like a password (redaction markers)
+    # NB: B023 (loop variable not bound in closure) is deliberately NOT here.
+    # That is a genuine bug class - the closure sees the final loop value - so it
+    # stays blocking.
+    "RUF100",  # "unused noqa" - see external= below. Because the advisory rules
+               # (BLE001, FLY002, UP...) are deliberately not selected here,
+               # ruff would consider their noqa comments unused and DELETE the
+               # written justification for every intentional broad except. The
+               # codebase documents those decisions inline and has tests
+               # asserting the comments exist; stripping them loses real intent.
+]
+
+# Codes handled by the advisory security-scan run rather than this blocking one.
+# Declaring them external stops RUF100 treating their `# noqa` as dead weight.
+external = ["BLE001", "FLY002", "FURB188", "UP", "I001", "SIM", "C4", "PTH", "RET", "ARG"]
+
+# NOT selected, deliberately: T20 (print). Measurement showed 25-96 hits per
+# repo, all in CLI entry points and REPL skins where writing to stdout is the
+# product's actual output. Blocking on it would mean either 200+ noqa comments
+# or a disabled gate.
+
+[tool.ruff.lint.per-file-ignores]
+# Tests legitimately do things that are findings in production code.
+"cli_anything/comfyui/tests/**" = [
+    "S101",   # assert - that is what a test is
+    "S603", "S607",  # subprocess - tests round-trip the real CLI
+    "S314", "S320",  # XML parsing - fixture data the test wrote itself
+    "S105", "S106", "S108",  # dummy tokens / tmp paths in fixtures
+    "B011",   # assert False
+    "E741",   # one-letter loop vars in test scaffolding
+    "S110",   # try/except/pass - tests deliberately swallow teardown errors
+    "S108",   # /tmp paths in fixtures
+    "B017",   # assertRaises(Exception) in negative-path tests
+    "F841",   # unused local - common in arrange/act/assert scaffolding
+    "RUF059", # unused unpacked variable in fixtures
+]
+
+# --- individually justified file carve-outs ---
+# optional-dependency probes inside try/except ImportError
+"cli_anything/comfyui/**/*_cli.py" = ["F401"]
+# shells out to kubectl by design; argv is a list, never shell=True
+"cli_anything/comfyui/core/k8s_backend.py" = ["S603"]
+# prompt_toolkit probed inside try/except ImportError
+"cli_anything/comfyui/utils/repl_skin.py" = ["F401"]
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+markers = [
+    "integration: needs external software installed (skipped unless available)",
+]
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["cli_anything"]
+branch = true
+omit = [
+    "cli_anything/comfyui/tests/**",
+    # Vendored verbatim from the cli-anything plugin. Measuring it reports OUR
+    # coverage as lower than it is and invites tests for code this repo does
+    # not own.
+    "*/utils/repl_skin.py",
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@(abc\\.)?abstractmethod",
+]
