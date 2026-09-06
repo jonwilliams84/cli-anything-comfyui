@@ -24,7 +24,16 @@ jobs:
       - name: Install and run tests with coverage
         run: |
           pip install -e . pytest pytest-cov
-          if [ -d tests ]; then
+          # UNIT TESTS ONLY, for the same reason ci.yml gives: test_full_e2e.py
+          # drives a REAL ComfyUI holding models in VRAM, and a GitHub runner
+          # has neither a GPU nor a server. The E2E tests do not skip when one
+          # is missing — they fail loudly, by design — so this advisory scan
+          # must not invoke them or it reports a red build for a dependency the
+          # runner structurally cannot host. Seen on the first push: "No ComfyUI
+          # at http://127.0.0.1:8188 (Connection refused)".
+          if [ -f cli_anything/comfyui/tests/test_core.py ]; then
+            python3 -m pytest cli_anything/comfyui/tests/test_core.py -q --cov=cli_anything --cov-report=term-missing --cov-report=xml
+          elif [ -d tests ]; then
             python3 -m pytest tests/ -q --cov=cli_anything --cov-report=term-missing --cov-report=xml
           elif [ -d cli_anything ]; then
             python3 -m pytest cli_anything/ -q --cov=cli_anything --cov-report=term-missing --cov-report=xml
