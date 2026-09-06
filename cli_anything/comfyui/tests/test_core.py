@@ -466,11 +466,15 @@ class FakeClient:
         self.fail_on = set(fail_on)
         self.drop_prompt_id = drop_prompt_id
         self.submitted = []
+        self.fronts = []
+        self.extra_data = []
         self.freed = 0
         self.wrote = {}
 
     def submit(self, graph, front=False, extra_data=None):
         self.submitted.append(graph)
+        self.fronts.append(front)
+        self.extra_data.append(extra_data)
         if len(self.submitted) - 1 in self.fail_on:
             raise be.ComfyError("window exploded")
         if self.drop_prompt_id:
@@ -510,6 +514,17 @@ def test_submit_and_wait_flattens_the_outputs():
     assert res["output_count"] == 1
     assert res["outputs"][0]["filename"] == "a.png"
     assert res["completed"] is True
+
+
+def test_submit_and_wait_forwards_front_and_extra_data():
+    c = FakeClient(outputs=OUT_ENTRY)
+    run_core.submit_and_wait(c, {}, front=True, extra_data={"filename": "job1"})
+    assert c.fronts == [True]
+    assert c.extra_data == [{"filename": "job1"}]
+    # The default path sends neither flag — the ordinary render.
+    plain = FakeClient(outputs=OUT_ENTRY)
+    run_core.submit_and_wait(plain, {})
+    assert plain.fronts == [False] and plain.extra_data == [None]
 
 
 def test_submit_and_wait_without_a_prompt_id_raises():
@@ -777,6 +792,24 @@ def test_run_queues_the_session_graph_and_records_the_prompt_id(tmp_path, monkey
     assert d["download"]["downloaded"] == 1
 
 
+def test_run_forwards_extra_data_and_rejects_non_json(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "--session", str(p), "run", "--extra-data", '{"filename": "job1"}'],
+        ).output
+    )
+    assert d["output_count"] == 1
+    assert fake.extra_data == [{"filename": "job1"}]
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "run", "--extra-data", "{not json"])
+    assert r.exit_code == 1 and "--extra-data must be a JSON object" in r.output
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "run", "--extra-data", "[1, 2]"])
+    assert r.exit_code == 1 and "JSON object" in r.output
+
+
 def test_windows_runs_every_graph_frees_between_and_downloads(tmp_path, monkeypatch):
     fake = FakeClient(outputs=OUT_ENTRY)
     monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
@@ -871,6 +904,30 @@ def test_submit_sends_front_and_extra_data(monkeypatch):
     assert body["client_id"] == c.client_id
 
 
+def test_history_delete_clears_all_or_deletes_named_prompts(monkeypatch):
+    """POST /history: {"clear": true} wipes, {"delete": [...]} prunes named ids."""
+    reqs = _capture_requests(monkeypatch)
+    c = be.ComfyUI()
+    assert c.history_delete() == {"clear": True}
+    assert c.history_delete(["pid-9", "pid-8"]) == {"delete": ["pid-9", "pid-8"]}
+    assert [(r.get_method(), r.full_url) for r in reqs] == [
+        ("POST", "http://127.0.0.1:8188/history"),
+        ("POST", "http://127.0.0.1:8188/history"),
+    ]
+    assert json.loads(reqs[0].data) == {"clear": True}
+    assert json.loads(reqs[1].data) == {"delete": ["pid-9", "pid-8"]}
+
+
+def test_upload_image_carries_kind_and_overwrite_false_in_the_multipart_body(monkeypatch, tmp_path):
+    reqs = _capture_requests(monkeypatch, payload=b'{"name":"up.png"}')
+    f = tmp_path / "up.png"
+    f.write_bytes(b"\x89PNG fake")
+    be.ComfyUI().upload_image(str(f), kind="temp", overwrite=False)
+    body = reqs[0].data
+    assert b'name="type"\r\n\r\ntemp\r\n' in body
+    assert b'name="overwrite"\r\n\r\nfalse\r\n' in body
+
+
 def test_the_mutating_endpoints_hit_their_verbs_paths_and_bodies(monkeypatch):
     reqs = _capture_requests(monkeypatch)
     c = be.ComfyUI()
@@ -952,7 +1009,9 @@ class FakeServer:
         self.cancelled = []
         self.cleared = 0
         self.uploads = []
+        self.upload_kwargs = []
         self.mask_uploads = []
+        self.history_deleted = []
 
     def object_info(self):
         return OI
@@ -1016,7 +1075,12 @@ class FakeServer:
 
     def upload_image(self, path, subfolder="", overwrite=True, kind="input"):
         self.uploads.append((path, subfolder))
+        self.upload_kwargs.append({"kind": kind, "overwrite": overwrite})
         return {"name": os.path.basename(path), "subfolder": subfolder}
+
+    def history_delete(self, prompt_ids=None):
+        self.history_deleted.append(list(prompt_ids) if prompt_ids else None)
+        return {"delete": list(prompt_ids)} if prompt_ids else {"clear": True}
 
     def upload_mask(self, path, original_ref, kind="temp"):
         self.mask_uploads.append((path, original_ref, kind))
@@ -1066,6 +1130,32 @@ def test_history_list_and_outputs_with_download(monkeypatch, tmp_path):
     assert (dest / "a.png").read_bytes()[:4] == b"\x89PNG"
 
 
+def test_history_clear_wipes_all_or_one_prompt(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "history", "clear", "--id", "pid-9"]).output)
+    assert d["deleted"] == ["pid-9"] and fake.history_deleted == [["pid-9"]]
+    human = runner.invoke(cl.cli, ["history", "clear", "--id", "pid-9"])
+    assert human.exit_code == 0 and "deleted history for pid-9" in human.output
+    d = json.loads(runner.invoke(cl.cli, ["--json", "history", "clear"]).output)
+    assert d["cleared"] is True and fake.history_deleted[-1] is None
+    human = runner.invoke(cl.cli, ["history", "clear"])
+    assert human.exit_code == 0 and "history cleared" in human.output
+
+
+def test_history_clear_without_a_server_fails_loudly(monkeypatch):
+    class Down:
+        def __init__(self, **kw):
+            pass
+
+        def history_delete(self, prompt_ids=None):
+            raise be.ComfyUnavailable("http://127.0.0.1:8188")
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    r = runner.invoke(cl.cli, ["--json", "history", "clear"])
+    assert r.exit_code == 1 and "No ComfyUI" in r.output
+
+
 def test_history_outputs_falls_back_to_the_session_and_reports_unknowns(monkeypatch, tmp_path):
     fake = FakeServer()
     monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
@@ -1098,6 +1188,24 @@ def test_assets_upload_and_download(monkeypatch, tmp_path):
         runner.invoke(cl.cli, ["--json", "assets", "download", "a.png", str(dest)]).output
     )
     assert d["bytes"] == 4 and dest.read_bytes() == b"\x89PNG"
+
+
+def test_assets_upload_kind_and_no_overwrite_reach_the_server(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    src = tmp_path / "in.png"
+    src.write_bytes(b"x")
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "assets", "upload", str(src), "--kind", "temp", "--no-overwrite"],
+        ).output
+    )
+    assert d["name"] == "in.png"
+    assert fake.upload_kwargs == [{"kind": "temp", "overwrite": False}]
+    human = runner.invoke(cl.cli, ["assets", "upload", str(src), "--no-overwrite"])
+    assert human.exit_code == 0
+    assert fake.upload_kwargs[-1] == {"kind": "input", "overwrite": False}
 
 
 def test_models_lists_folders_and_one_folder(monkeypatch):

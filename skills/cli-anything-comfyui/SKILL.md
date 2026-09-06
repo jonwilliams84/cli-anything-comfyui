@@ -24,10 +24,12 @@ Desktop app, or `python main.py --listen 0.0.0.0 --port 8188`) or set
 - `nodes` — `list`, `search <text>`, `schema <ClassType>`
 - `workflow` — `convert`, `deps`, `info`, `find`, `set`, `unset`, `validate`,
   `export`, `diff`
-- `run` — queue the loaded graph, wait, report outputs
-- `queue` — `list`, `cancel <prompt_id>`, `clear`
-- `history` — `list`, `outputs [prompt_id]`
-- `assets` — `upload <file>`, `mask <file> <original_ref>`, `download <filename> <dest>`
+- `run` — queue the loaded graph, wait, report outputs; `--extra-data 'JSON'`
+  rides along with the prompt (e.g. a filename the server embeds in PNG metadata)
+- `queue` — `list`, `wait <prompt_id> [--download DIR]`, `cancel <prompt_id>`, `clear`
+- `history` — `list`, `outputs [prompt_id]`, `clear [--id PROMPT_ID]`
+- `assets` — `upload <file> [--kind input|temp|output] [--no-overwrite]`,
+  `mask <file> <original_ref>`, `download <filename> <dest>`
 - `models` — model folders and their contents
 - `traps` — recorded failure modes for this software
 - `status` — session + server state
