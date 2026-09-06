@@ -2,9 +2,31 @@
 
 All notable changes to this project are documented here.
 
+## [0.14.0] — 2026-09-06
+
+- Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py` and 2 more. (9 files changed, 314 insertions(+), 4 deletions(-))
+
 ## [0.13.0] — 2026-09-06
 
 - Updated `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (3 files changed, 211 insertions(+))
+
+## [Unreleased] — refine round 14
+
+One new command, aimed at the question every failed render asks and no existing
+command could answer: WHY did it fail.
+
+- **`history show [PROMPT_ID] [--graph PATH]`** — one history entry in full:
+  status, the server's execution messages (the `execution_error` rows with node
+  id, node type, exception type and message — recorded ONLY in the entry's
+  status.messages, which `history list` and `history outputs` both hide), and
+  its output files. Defaults to the session's `last_prompt_id`; exits 1 when
+  the entry reports an error so `history show && …` chains stop at the failure.
+- `--graph PATH` writes the exact API-format graph the server ran — re-runnable
+  with `run --path`, diffable with `workflow diff` — even for a failed entry.
+- 5 new unit tests in `test_core.py` (failed-entry payload + exit code, the
+  session-id default, `--graph` write/refuse, no-id/no-entry errors, malformed
+  and overflowing status.messages rows). 184 total, all passing. Coverage:
+  100% statements, 100% branches. No existing test weakened, skipped or deleted.
 
 ## [Unreleased] — refine round 13
 

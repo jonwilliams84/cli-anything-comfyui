@@ -27,7 +27,9 @@ Desktop app, or `python main.py --listen 0.0.0.0 --port 8188`) or set
 - `run` — queue the loaded graph, wait, report outputs; `--extra-data 'JSON'`
   rides along with the prompt (e.g. a filename the server embeds in PNG metadata)
 - `queue` — `list`, `wait <prompt_id> [--download DIR]`, `cancel <prompt_id>`, `clear`
-- `history` — `list`, `outputs [prompt_id]`, `clear [--id PROMPT_ID]`
+- `history` — `list`, `show [prompt_id] [--graph PATH]`, `outputs [prompt_id]`,
+  `clear [--id PROMPT_ID]` (`show` reports a failure's execution_error rows
+  and can write the graph that ran; it exits 1 on an error entry)
 - `assets` — `upload <file> [--kind input|temp|output] [--no-overwrite]`,
   `mask <file> <original_ref>`, `download <filename> <dest>`
 - `models` — model folders and their contents

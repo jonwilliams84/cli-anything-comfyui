@@ -276,6 +276,40 @@ class TestCLISubprocess:
             assert fh.read(8) == b"\x89PNG\r\n\x1a\n"
         print(f"\n  subprocess render: {files[0]['path']} ({files[0]['bytes']:,} bytes)")
 
+    def test_history_show_reports_a_real_render_and_writes_its_graph(self, tmp_path):
+        """`history show` on a prompt this very run produced: the status is
+        there, the outputs are there, and `--graph` hands back the exact graph
+        the server ran."""
+        sess = str(tmp_path / "s.json")
+        graph = str(tmp_path / "g.json")
+        with open(graph, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "1": {
+                        "class_type": "EmptyImage",
+                        "inputs": {"width": 32, "height": 32, "batch_size": 1, "color": 0},
+                    },
+                    "2": {
+                        "class_type": "SaveImage",
+                        "inputs": {"images": ["1", 0], "filename_prefix": "cli_e2e_show"},
+                    },
+                },
+                fh,
+            )
+        self._run(["--json", "--session", sess, "workflow", "convert", graph])
+        r = json.loads(self._run(["--json", "--session", sess, "run"]).stdout)
+        pid = r["prompt_id"]
+        ran = str(tmp_path / "ran.json")
+        d = json.loads(
+            self._run(["--json", "--session", sess, "history", "show", pid, "--graph", ran]).stdout
+        )
+        assert d["prompt_id"] == pid and d["status"] == "success"
+        assert d["completed"] is True
+        assert d["output_count"] > 0 and d["outputs"][0]["filename"].endswith(".png")
+        assert d["graph_nodes"] == 2 and d["graph"] == os.path.abspath(ran)
+        with open(ran, encoding="utf-8") as fh:
+            assert json.load(fh)["2"]["inputs"]["filename_prefix"] == "cli_e2e_show"
+
     def test_dry_run_does_not_write_the_session(self, tmp_path):
         sess = str(tmp_path / "s.json")
         graph = str(tmp_path / "g.json")
