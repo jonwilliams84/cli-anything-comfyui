@@ -2,11 +2,29 @@
 
 All notable changes to this project are documented here.
 
+## [0.3.0] — 2026-09-06
+
+- Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (7 files changed, 396 insertions(+), 2 deletions(-))
+
 ## [0.2.0] — 2026-09-06
 
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (7 files changed, 556 insertions(+), 8 deletions(-))
 
 ## [Unreleased]
+
+Second refine pass — CLI surface completeness and coverage of what already shipped:
+
+- **`nodes categories`** — the discovery half of `nodes list --category`: the
+  category prefixes installed on the server, with node counts, biggest first.
+- **`workflow outputs`** — the nodes in the loaded graph (or a `--path` file)
+  that actually write files; a graph with none runs, succeeds and saves
+  nothing. Composes with `run --download`.
+- Unit suite expanded from 60 to 75 tests; total coverage 69.98% → 85.52%
+  (`comfyui_cli.py` 52% → 77%, `comfyui_backend.py` 79% → 97%, `core/run.py`
+  to 100%). Previously untested handlers now exercised: `queue`, `history`,
+  `assets`, `models`, `nodes`, `server free/interrupt`, `workflow
+  validate/info/deps`; backend multipart upload, mutating endpoints, and
+  request-path construction.
 
 Refine pass — coverage driven from the archived driver scripts' needs:
 

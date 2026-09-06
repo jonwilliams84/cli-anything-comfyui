@@ -72,8 +72,9 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
 ### Command groups
 
     server     status / features / embeddings / free / interrupt
-    nodes      list, search, schema — the 1805 types and what each input is called
-    workflow   convert (UI→API), validate, info, deps, get/set a node input
+    nodes      list, search, schema, categories — the 1805 types and what each
+               input is called, discoverable by category prefix
+    workflow   convert (UI→API), validate, info, outputs, deps, get/set a node input
     run        submit a graph and wait, with progress
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest

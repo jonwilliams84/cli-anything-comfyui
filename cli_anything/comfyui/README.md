@@ -31,8 +31,10 @@ cli-anything-comfyui --version
 cli-anything-comfyui server status              # version, devices, free VRAM
 cli-anything-comfyui server features            # the server's feature flags
 cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, which are links
+cli-anything-comfyui nodes categories           # category prefixes installed here, with counts
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
 cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
+cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between

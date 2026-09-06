@@ -329,6 +329,36 @@ def nodes_schema(ctx, class_type, json_):
     emit(ctx, payload, lines)
 
 
+@nodes.command("categories")
+@json_option
+@click.pass_context
+def nodes_categories(ctx, json_):
+    """The category prefixes installed here, with node counts.
+
+    `nodes list --category` filters, but filtering needs something to filter BY.
+    This is the discovery half: what this server actually has, biggest first.
+    """
+    _merge_json(ctx, json_)
+    try:
+        oi = _object_info(ctx)
+    except ComfyError as exc:
+        die(str(exc))
+    counts = {}
+    for info in oi.values():
+        cat = info.get("category") or "(none)"
+        counts[cat] = counts.get(cat, 0) + 1
+    rows = [
+        {"category": cat, "nodes": n}
+        for cat, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    emit(
+        ctx,
+        {"count": len(rows), "node_types": len(oi), "categories": rows},
+        [f"{len(rows)} categor(y/ies) across {len(oi)} node types"]
+        + [f"  {r['nodes']:>5d}  {r['category']}" for r in rows[:40]],
+    )
+
+
 # -------------------------------------------------------------------- workflow
 
 
@@ -466,6 +496,33 @@ def workflow_find(ctx, class_type, title, json_):
             for h in hits
         ],
     )
+
+
+@workflow.command("outputs")
+@click.option(
+    "--path", "path", default=None, type=click.Path(), help="Inspect a file instead of the session."
+)
+@json_option
+@click.pass_context
+def workflow_outputs(ctx, path, json_):
+    """Which nodes in the graph actually write files.
+
+    A graph with none of these runs, reports success and saves nothing — the
+    quietest way to waste a render. Composes with `run --download`: every node
+    listed here is one whose files that download will carry.
+    """
+    _merge_json(ctx, json_)
+    api = _graph(ctx, path)
+    try:
+        outs = wf.outputs(api, _object_info(ctx))
+    except ComfyError as exc:
+        die(str(exc))
+    lines = [f"{len(api)} nodes, {len(outs)} output node(s)"]
+    if not outs:
+        lines.append("  WARNING: no output node — this graph will run and write nothing")
+    for o in outs:
+        lines.append(f"  output: node {o['node']} ({o['class_type']})")
+    emit(ctx, {"nodes": len(api), "output_count": len(outs), "outputs": outs}, lines)
 
 
 @workflow.command("set")
