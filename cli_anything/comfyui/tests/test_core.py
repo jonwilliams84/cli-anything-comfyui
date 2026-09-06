@@ -1668,3 +1668,152 @@ def test_workflow_validate_exits_1_when_the_graph_is_rejectable(monkeypatch, tmp
     r = runner.invoke(cl.cli, ["workflow", "validate", "--path", g])
     assert r.exit_code == 1, "an invalid graph must fail the shell, not just print"
     assert "problem(s)" in r.output and "not installed" in r.output
+
+
+# ----------------------------------------------------- refine: userdata (server tree)
+
+
+class FakeUserdataServer:
+    """A ComfyUI answering the /userdata CRUD from memory."""
+
+    def __init__(self, **kw):
+        self.url = "http://127.0.0.1:8188"
+        self.tree = {"user/default/workflows/a.json": b'{"id": "a"}'}
+        self.saved = {}
+        self.deleted = []
+
+    def userdata_list(self, directory="user", recurse=True, full_info=False, in_use=False):
+        hits = [p for p in self.tree if p.startswith(directory.strip("/") + "/") or p == directory]
+        if full_info:
+            return [{"path": p, "size": len(self.tree[p])} for p in sorted(hits)]
+        return sorted(hits)
+
+    def userdata_get(self, path):
+        p = path.strip("/")
+        if p not in self.tree:
+            raise be.ComfyError(f"GET /userdata/{p} -> HTTP 404: not found")
+        return self.tree[p]
+
+    def userdata_put(self, path, data, overwrite=True):
+        p = path.strip("/")
+        if p in self.tree and not overwrite:
+            raise be.ComfyError(f"POST /userdata/{p} -> HTTP 409: exists")
+        self.saved[p] = data
+        self.tree[p] = data
+        return {"path": p}
+
+    def userdata_delete(self, path):
+        p = path.strip("/")
+        self.tree.pop(p, None)
+        self.deleted.append(p)
+        return {"deleted": p}
+
+
+def test_userdata_list_sends_dir_recurse_and_full_info(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'["user/default/workflows/a.json"]')
+    res = be.ComfyUI().userdata_list("user/default/workflows", recurse=False, full_info=True)
+    assert res == ["user/default/workflows/a.json"]
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(reqs[0].full_url).query)
+    assert q["dir"] == ["user/default/workflows"]
+    assert q["recurse"] == ["false"] and q["full_info"] == ["true"]
+
+
+def test_userdata_get_returns_the_raw_bytes(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'{"id": "a"}')
+    blob = be.ComfyUI().userdata_get("user/default/workflows/a.json")
+    assert blob == b'{"id": "a"}', "userdata_get must not JSON-decode a canvas"
+    assert reqs[0].get_method() == "GET"
+    assert "/userdata/user/default/workflows/a.json" in reqs[0].full_url
+
+
+def test_userdata_put_sends_bytes_with_the_overwrite_flag(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'{"path": "user/default/workflows/a.json"}')
+    be.ComfyUI().userdata_put("user/default/workflows/a.json", {"id": "a"})
+    req = reqs[0]
+    assert req.get_method() == "POST" and "overwrite=true" in req.full_url
+    assert req.data == b'{"id": "a"}', "a dict is serialised to bytes for the wire"
+
+
+def test_userdata_delete_uses_the_delete_method(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b"{}")
+    be.ComfyUI().userdata_delete("user/default/workflows/a.json")
+    assert reqs[0].get_method() == "DELETE"
+    assert "/userdata/user/default/workflows/a.json" in reqs[0].full_url
+
+
+def test_userdata_list_reports_the_server_tree(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "userdata", "list", "user/default/workflows"]).output
+    )
+    assert d["count"] == 1 and d["items"] == ["user/default/workflows/a.json"]
+
+
+def test_userdata_get_writes_the_bytes_to_out(tmp_path, monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    out = tmp_path / "a.json"
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "userdata", "get", "user/default/workflows/a.json", "--out", str(out)],
+        ).output
+    )
+    assert d["bytes"] == 11
+    assert out.read_bytes() == b'{"id": "a"}'
+
+
+def test_userdata_get_names_a_missing_file_loudly(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(cl.cli, ["--json", "userdata", "get", "user/default/workflows/nope.json"])
+    assert r.exit_code == 1 and "404" in r.output
+
+
+def test_userdata_put_saves_text_and_overwrite_refuses(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "userdata", "put", "user/default/workflows/b.json", "--text", '{"id": "b"}'],
+        ).output
+    )
+    assert d == {"path": "user/default/workflows/b.json"}
+    assert fake.saved["user/default/workflows/b.json"] == b'{"id": "b"}'
+    r = runner.invoke(
+        cl.cli,
+        [
+            "--json",
+            "userdata",
+            "put",
+            "user/default/workflows/b.json",
+            "--text",
+            "x",
+            "--no-overwrite",
+        ],
+    )
+    assert r.exit_code == 1 and "409" in r.output
+
+
+def test_userdata_put_refuses_ambiguous_input(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(cl.cli, ["--json", "userdata", "put", "p.json"])
+    assert r.exit_code == 1 and "exactly one" in r.output
+    r = runner.invoke(cl.cli, ["--json", "userdata", "put", "p.json", "a.json", "--text", "x"])
+    assert r.exit_code != 0, "FILE plus --text is a usage error, click or us must refuse"
+    assert fake.saved == {}, "no write on a bad invocation"
+
+
+def test_userdata_delete_removes_from_the_server_tree(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "userdata", "delete", "user/default/workflows/a.json"]
+        ).output
+    )
+    assert d == {"deleted": "user/default/workflows/a.json"}
+    assert fake.tree == {} and fake.deleted == ["user/default/workflows/a.json"]

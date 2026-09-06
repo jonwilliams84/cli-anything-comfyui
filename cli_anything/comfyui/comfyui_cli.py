@@ -999,6 +999,114 @@ def assets_download(ctx, filename, dest, subfolder, kind, json_):
     emit(ctx, res, f"wrote {res['path']} ({res['bytes']:,} bytes)")
 
 
+# ------------------------------------------------------------------- user data
+
+
+@cli.group()
+def userdata():
+    """Files the server keeps for a user — the saved-workflow tree.
+
+    The UI's `Save` button writes here (user/default/workflows/*.json). The
+    API-format graph you converted and ran can be pushed back into that tree,
+    so it opens in the canvas like any other saved workflow.
+    """
+
+
+@userdata.command("list")
+@click.argument("directory", default="user")
+@click.option("--no-recurse", is_flag=True, help="Do not descend into subfolders.")
+@click.option("--full-info", is_flag=True, help="Size and modified time per file.")
+@json_option
+@click.pass_context
+def userdata_list_cmd(ctx, directory, no_recurse, full_info, json_):
+    """List files in the server's user data tree."""
+    _merge_json(ctx, json_)
+    try:
+        items = client(ctx).userdata_list(directory, recurse=not no_recurse, full_info=full_info)
+    except ComfyError as exc:
+        die(str(exc))
+    items = items if isinstance(items, list) else list(items)
+    emit(
+        ctx,
+        {"dir": directory, "count": len(items), "items": items},
+        [f"{len(items)} file(s) under {directory}"] + [f"  {i}" for i in items],
+    )
+
+
+@userdata.command("get")
+@click.argument("path")
+@click.option("--out", type=click.Path(), help="Write the raw bytes here instead of stdout.")
+@json_option
+@click.pass_context
+def userdata_get_cmd(ctx, path, out, json_):
+    """Fetch one file from the server's user data tree."""
+    _merge_json(ctx, json_)
+    try:
+        blob = client(ctx).userdata_get(path)
+    except ComfyError as exc:
+        die(str(exc))
+    if out:
+        out = os.path.abspath(os.path.expanduser(out))
+        with open(out, "wb") as fh:
+            fh.write(blob)
+        emit(
+            ctx,
+            {"path": path, "out": out, "bytes": len(blob)},
+            f"wrote {out} ({len(blob):,} bytes)",
+        )
+        return
+    emit(ctx, {"path": path, "bytes": len(blob)}, blob.decode("utf-8", "replace"))
+
+
+@userdata.command("put")
+@click.argument("path")
+@click.argument("file", type=click.Path(exists=True), required=False)
+@click.option("--text", default=None, help="Save this text as the file's contents instead.")
+@click.option("--no-overwrite", is_flag=True, help="Refuse if the file already exists.")
+@json_option
+@click.pass_context
+def userdata_put_cmd(ctx, path, file, text, no_overwrite, json_):
+    """Save a local file (or --text) into the server's user data tree.
+
+    Example: push a converted graph back into the server's workflow library,
+    so it opens in the canvas:
+
+      cli-anything-comfyui userdata put user/default/workflows/rerun.json rerun.json
+    """
+    _merge_json(ctx, json_)
+    if (file is None) == (text is None):
+        die("give exactly one of FILE or --text")
+    if file:
+        file = os.path.abspath(os.path.expanduser(file))
+        with open(file, "rb") as fh:
+            data = fh.read()
+    else:
+        data = text.encode()
+    try:
+        res = client(ctx).userdata_put(path, data, overwrite=not no_overwrite)
+    except ComfyError as exc:
+        die(str(exc))
+    emit(
+        ctx,
+        res or {"path": path},
+        f"saved {path} ({len(data):,} bytes)" + ("" if not no_overwrite else " (no overwrite)"),
+    )
+
+
+@userdata.command("delete")
+@click.argument("path")
+@json_option
+@click.pass_context
+def userdata_delete_cmd(ctx, path, json_):
+    """Delete one file from the server's user data tree."""
+    _merge_json(ctx, json_)
+    try:
+        client(ctx).userdata_delete(path)
+    except ComfyError as exc:
+        die(str(exc))
+    emit(ctx, {"deleted": path}, f"deleted {path}")
+
+
 # ---------------------------------------------------------------------- models
 
 

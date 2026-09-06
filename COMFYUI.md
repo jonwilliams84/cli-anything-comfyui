@@ -26,6 +26,8 @@ harness is an HTTP client to the REAL ComfyUI, exactly as the browser is:
     GET  /system_stats        versions, argv, devices, VRAM
     GET  /internal/logs       the server's own log lines (newer builds)
     GET  /ws                  progress events while a prompt executes
+    GET  /userdata?dir=...    list the server's user tree (saved canvases)
+    GET|POST|DELETE /userdata/{path}   read / save / delete one file in it
 
 `comfy-cli` exists but installs and manages ComfyUI; it does not drive a running
 instance. There is no `melt`/`libreoffice --headless` equivalent — **the server is

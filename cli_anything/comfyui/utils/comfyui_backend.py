@@ -326,6 +326,48 @@ class ComfyUI:
             fh.write(blob)
         return {"path": dest, "bytes": len(blob)}
 
+    # ------------------------------------------------------------ user data
+
+    def _userdata_path(self, path):
+        """Encode one userdata path, keeping slashes so the tree stays a tree."""
+        return urllib.parse.quote(path.strip("/"), safe="/")
+
+    def userdata_list(self, directory="user", recurse=True, full_info=False, in_use=False):
+        """List the server's user data tree (GET /userdata).
+
+        This is where the UI keeps saved canvases — `user/default/workflows/`
+        — and the only read the harness has over that archive.
+        """
+        q = urllib.parse.urlencode(
+            {
+                "dir": directory,
+                "recurse": "true" if recurse else "false",
+                "full_info": "true" if full_info else "false",
+                "in_use": "true" if in_use else "false",
+            }
+        )
+        return self._request("GET", f"/userdata?{q}")
+
+    def userdata_get(self, path):
+        """Raw bytes of one file in the user data tree (GET /userdata/{path})."""
+        return self._request("GET", f"/userdata/{self._userdata_path(path)}", raw=True)
+
+    def userdata_put(self, path, data, overwrite=True):
+        """Save bytes into the user data tree (POST /userdata/{path}).
+
+        `data` is bytes, or anything JSON-serialisable (dict of a converted
+        graph is the common case). `overwrite=False` lets the server refuse
+        with HTTP 409 when the file is already there.
+        """
+        if not isinstance(data, (bytes, bytearray)):
+            data = json.dumps(data).encode()
+        q = f"?overwrite={'true' if overwrite else 'false'}"
+        return self._request("POST", f"/userdata/{self._userdata_path(path)}{q}", bytes(data))
+
+    def userdata_delete(self, path):
+        """Delete one file from the user data tree (DELETE /userdata/{path})."""
+        return self._request("DELETE", f"/userdata/{self._userdata_path(path)}")
+
     # --------------------------------------------------------------- waiting
 
     def wait(self, prompt_id, timeout=1800, poll=1.0, on_tick=None):

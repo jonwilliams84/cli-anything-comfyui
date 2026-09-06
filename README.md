@@ -38,6 +38,8 @@ cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph writ
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between
+cli-anything-comfyui userdata list user/default/workflows      # the server's saved-workflow tree
+cli-anything-comfyui userdata put user/default/workflows/r.json r.json  # push a graph into it
 cli-anything-comfyui traps                      # the recorded ways this goes wrong
 ```
 
@@ -88,5 +90,6 @@ file. See `tests/TEST.md`.
 - **Subgraph expansion.** A node whose `class_type` is a bare UUID is a subgraph
   instance; the harness names it and refuses rather than converting it wrongly.
 - **`review`** — contact sheets and frame sampling of produced video.
-- Windowed rendering (`run_windows`) exists in the core but has no CLI command
-  or E2E test yet.
+- **Userdata move/copy.** `userdata list/get/put/delete` cover the server's
+  `/userdata` CRUD; the API's `POST /userdata/{path}/move/{to}` is not wrapped
+  yet.
