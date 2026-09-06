@@ -33,6 +33,7 @@ cli-anything-comfyui server features            # the server's feature flags
 cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, which are links
 cli-anything-comfyui nodes categories           # category prefixes installed here, with counts
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
+cli-anything-comfyui workflow models my-api.json  # are the model FILES it names on the server
 cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
@@ -70,6 +71,14 @@ runs with `steps="randomize"`.
 **Telling you what a workflow needs.** `workflow deps` reads the requirement off
 the workflow instead of off your memory. Run across 48 archived canvases it
 reported: 22 want rgthree, 5 want KJNodes' Get/SetNode, 2 want GGUF.
+
+**Checking the graph will not die mid-render.** Three pre-flight checks, each
+covering what the others cannot: `workflow deps` (node TYPES), `workflow
+validate` (graph SHAPE), and `workflow models` (model FILES — every widget input
+ending in `_name`, checked against the server's own `/models` listings, all
+folders). Both of the first two pass a graph whose CheckpointLoaderSimple names
+a checkpoint that is not on disk; that graph queues clean and dies seconds into
+execution. `workflow models` exits 1 when something is missing.
 
 **Not lying about what happened.** Outputs are read from every bucket — images,
 gifs, videos, audio — because code that reads only `images` finds nothing for

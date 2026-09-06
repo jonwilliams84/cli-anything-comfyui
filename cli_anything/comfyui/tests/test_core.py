@@ -2922,3 +2922,191 @@ def test_graph_of_accepts_a_bare_dict_too():
 )
 def test_graph_of_returns_none_when_there_really_is_no_graph(entry):
     assert be.graph_of(entry) is None
+
+
+# ---------------------------------------------------------------- workflow models
+
+
+class FakeModelsServer:
+    """A ComfyUI answering only /models — for the model-availability check."""
+
+    def __init__(self, folders=None, fail_on=None):
+        # folder name -> files; `fail_on` lists folders whose listing raises.
+        self.folders = folders or {"checkpoints": ["a.safetensors", "b.safetensors"]}
+        self.fail_on = set(fail_on or ())
+        self.asked = []
+
+    def object_info(self):
+        return OI
+
+    def models(self, folder=None):
+        self.asked.append(folder)
+        if folder is None:
+            return list(self.folders)
+        if folder in self.fail_on:
+            raise be.ComfyError(f"cannot list {folder}")
+        return list(self.folders.get(folder, []))
+
+
+def test_model_refs_finds_the_loader_widget_inputs():
+    g = {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}},
+        "1": {
+            "class_type": "KSampler",
+            "inputs": {"seed": 1, "model": ["4", 0], "cfg": 8.0},
+        },
+    }
+    refs = wf.model_refs(g, OI)
+    assert refs == [
+        {
+            "node": "4",
+            "class_type": "CheckpointLoaderSimple",
+            "input": "ckpt_name",
+            "model": "a.safetensors",
+        }
+    ], "the seed INT and the wired `model` link are not model files"
+
+
+def test_model_refs_skips_links_unknown_types_and_wired_name_inputs():
+    local_oi = {
+        **OI,
+        "LoraLoader": {
+            "input": {
+                "required": {
+                    "lora_name": [["a.safetensors"]],
+                    "strength": ["FLOAT", {"default": 1.0}],
+                }
+            }
+        },
+    }
+    g = {
+        "1": {"class_type": "LoraLoader", "inputs": {"lora_name": ["4", 0], "strength": 1.0}},
+        "9": {"class_type": "DefinitelyNotInstalled", "inputs": {"ckpt_name": "a.safetensors"}},
+    }
+    assert wf.model_refs(g, local_oi) == [], (
+        "a _name input wired over a link, and a node with no schema, are not filename references"
+    )
+
+
+def test_index_models_builds_filename_to_folders():
+    fake = FakeModelsServer(
+        folders={"checkpoints": ["a.safetensors"], "loras": ["a.safetensors", "r.safetensors"]}
+    )
+    index = wf.index_models(fake)
+    assert index["a.safetensors"] == ["checkpoints", "loras"], "a file may live in several folders"
+    assert index["r.safetensors"] == ["loras"]
+    assert fake.asked == [None, "checkpoints", "loras"]
+
+
+def test_index_models_skips_a_folder_that_refuses_to_be_listed():
+    fake = FakeModelsServer(
+        folders={"checkpoints": ["a.safetensors"], "broken": []}, fail_on={"broken"}
+    )
+    index = wf.index_models(fake)
+    assert index == {"a.safetensors": ["checkpoints"]}
+
+
+def test_check_models_reports_hits_and_misses():
+    fake = FakeModelsServer(folders={"checkpoints": ["a.safetensors"]})
+    g = {
+        "4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}},
+        "5": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "gone.safetensors"}},
+    }
+    res = wf.check_models(fake, g, OI)
+    assert res["ok"] is False
+    assert res["count"] == 2 and res["missing_count"] == 1
+    assert res["missing"][0]["model"] == "gone.safetensors"
+    assert res["refs"][0]["installed_in"] == ["checkpoints"]
+    assert res["folders_scanned"] == 1
+
+
+def test_check_models_makes_no_server_calls_when_nothing_names_a_model():
+    class Loud:
+        def models(self, folder=None):
+            raise AssertionError("no model refs — /models must not be polled")
+
+    g = {"2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x"}}}
+    res = wf.check_models(Loud(), g, OI)
+    assert res["ok"] is True and res["count"] == 0 and res["folders_scanned"] == 0
+
+
+def test_workflow_models_passes_when_every_model_is_installed(monkeypatch, tmp_path):
+    fake = FakeModelsServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(tmp_path / "g.json")
+    with open(g, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "4": {
+                    "class_type": "CheckpointLoaderSimple",
+                    "inputs": {"ckpt_name": "a.safetensors"},
+                }
+            },
+            fh,
+        )
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "models", g]).output)
+    assert d["ok"] is True and d["count"] == 1 and d["missing_count"] == 0
+    assert d["refs"][0]["installed_in"] == ["checkpoints"]
+
+
+def test_workflow_models_names_the_missing_file_and_exits_1(monkeypatch, tmp_path):
+    fake = FakeModelsServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(tmp_path / "g.json")
+    with open(g, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "4": {
+                    "class_type": "CheckpointLoaderSimple",
+                    "inputs": {"ckpt_name": "gone.safetensors"},
+                }
+            },
+            fh,
+        )
+    r = runner.invoke(cl.cli, ["--json", "workflow", "models", g])
+    assert r.exit_code == 1
+    d = json.loads(r.output)
+    assert d["missing_count"] == 1 and d["missing"][0]["model"] == "gone.safetensors"
+
+
+def test_workflow_models_on_a_graph_with_no_loaders_never_polls_folders(monkeypatch, tmp_path):
+    class Loud(FakeModelsServer):
+        def models(self, folder=None):
+            raise AssertionError("no loaders — /models must not be polled")
+
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: Loud())
+    g = str(tmp_path / "g.json")
+    with open(g, "w", encoding="utf-8") as fh:
+        json.dump({"2": {"class_type": "SaveImage", "inputs": {"filename_prefix": "x"}}}, fh)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "models", g]).output)
+    assert d["ok"] is True and d["count"] == 0
+
+
+def test_index_models_accepts_dict_shaped_listings_and_skips_junk_rows():
+    """Some servers answer /models with objects, and a listing can carry
+    non-string rows. Both shapes are normalised; junk rows are skipped."""
+
+    class Weird:
+        def models(self, folder=None):
+            if folder is None:
+                return {"checkpoints": "described", "loras": "described"}
+            if folder == "checkpoints":
+                return {"a.safetensors": {"size": 1}}
+            return ["a.safetensors", 42, None]
+
+    index = wf.index_models(Weird())
+    assert index == {"a.safetensors": ["checkpoints", "loras"]}
+
+
+def test_workflow_models_dies_loudly_when_the_server_errors(monkeypatch, tmp_path):
+    class Down:
+        def __init__(self, **kw):
+            pass
+
+        def object_info(self):
+            raise be.ComfyUnavailable("http://127.0.0.1:8188", "down")
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    sess_file = _seed_session(tmp_path / "s.json", {"2": {"class_type": "SaveImage", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", str(sess_file), "workflow", "models"])
+    assert r.exit_code == 1 and "No ComfyUI" in r.output

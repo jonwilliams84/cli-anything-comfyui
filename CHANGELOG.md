@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented here.
 
+## [0.15.0] — 2026-09-06
+
+One new command, closing the third leg of pre-flight before a render.
+
+- **`workflow models [PATH]`** — whether the model FILES a graph names are on
+  this server. `workflow deps` checks node TYPES and `workflow validate` checks
+  graph SHAPE; both pass a graph whose CheckpointLoaderSimple names a checkpoint
+  that is not on disk, and that graph queues clean and dies seconds into
+  execution. Every widget input ending in `_name` (ckpt_name, lora_name,
+  vae_name, clip_name, unet_name, control_net_name, model_name, …) is checked
+  against the server's own `GET /models` listings across ALL folders —
+  membership anywhere, not in a predicted folder, because the folder a node
+  pack files its models under is not guessable. Exits 1 when something is
+  missing. A graph with no model inputs never polls /models at all.
+- New core functions in `core/workflow.py`: `model_refs`, `index_models`,
+  `check_models`.
+- 9 new unit tests in `test_core.py` (202 total, all passing; 100% statements
+  and branches), 3 new E2E subprocess tests in `test_full_e2e.py`.
+- Docs: README.md, cli_anything/comfyui/README.md, COMFYUI.md, TEST.md.
+
 ## [0.14.0] — 2026-09-06
 
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py` and 2 more. (9 files changed, 314 insertions(+), 4 deletions(-))

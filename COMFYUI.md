@@ -79,8 +79,10 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
     server     status / features / embeddings / free / interrupt / logs
     nodes      list, search, schema, categories — the 1805 types and what each
                input is called, discoverable by category prefix
-    workflow   convert (UI→API), validate, info, outputs, deps, get/set/unset a
-               node input, export the patched graph, diff it against a file
+    workflow   convert (UI→API), validate, info, outputs, deps, models (the
+               model FILES a graph names, checked against the server's own
+               /models listings), get/set/unset a node input, export the
+               patched graph, diff it against a file
     run        submit a graph and wait, with progress
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest
@@ -112,3 +114,20 @@ auto-save; `--dry-run` suppresses the save. Saves take an exclusive lock.
 There is no rendering gap to bridge here: the server IS the renderer. The
 harness's job is to hand it a valid API graph and verify what came back — file
 exists, non-zero, correct magic bytes, expected frame count/duration.
+
+### Pre-flight: the three checks, and why there are three
+
+`POST /prompt` validates a graph in two halves and neither asks whether the
+model files exist. `workflow deps` answers "which node TYPES must I reinstall"
+(from /object_info), `workflow validate` answers "what SHAPE would the server
+reject" (required inputs, dangling wires) — and both pass a graph whose
+CheckpointLoaderSimple names a checkpoint that is not on disk. That graph
+queues clean and dies seconds into execution, on the loader node, after the
+queue slot was already spent. `workflow models` is the third half: every
+widget input whose name ends in `_name` (the way every core loader and the
+packs that matter spell a filename) is checked against the server's OWN
+`GET /models` listings, across ALL folders — the folder a node pack expects
+is not guessable (`loras`? `Lora`? `diffusion_models`?), so the check is
+membership anywhere, not membership in a predicted folder. A graph with no
+model inputs never polls /models at all, so a folder outage cannot fail an
+irrelevant check. Exits 1 when something is missing.
