@@ -348,3 +348,24 @@ wrapped anywhere, even though the 48-canvas archive lives there.
 - 12 new unit tests (backend wire format + CLI behaviour, including 404/409
   surfacing) and one live-server E2E round trip. 123 unit tests, all passing;
   total coverage 93.5%.
+
+## 2026-09-06 — failure-path and REPL refinement
+
+The gap found this pass: the CLI layer was 86% covered, and what was missing
+was not features but usage patterns — what every command does when the server
+dies underneath it, and the REPL (0% covered) that agents fall into when they
+run the harness with no subcommand.
+
+- One dead-server fixture (`Dead`, every method raises) driven through 25
+  command invocations: each must exit 1 and name the failure, never traceback.
+- Missing-baseline `workflow diff`, `run`/`workflow export` with an empty
+  session, `--dry-run` (patches in memory, session file untouched, says so),
+  `--url`/`--timeout` propagation to the client, and `--json` placed AFTER the
+  subcommand (the `_merge_json` path).
+- The REPL, through a fake skin: banner + `help` + command dispatch + `exit`;
+  a crashing command reported through the skin with the REPL surviving; EOF
+  and KeyboardInterrupt leaving cleanly; and no-subcommand entering the REPL.
+  Plus `main()`'s delegation.
+- `comfyui_cli.py` 86% → 95%; total coverage 92% → 97%. 142 unit tests, all
+  passing. The live-server E2E suite is unchanged (it needs a real ComfyUI and
+  is not part of the CI gate).

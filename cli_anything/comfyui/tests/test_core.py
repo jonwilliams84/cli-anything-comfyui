@@ -16,6 +16,8 @@ import urllib.error
 import pytest
 from click.testing import CliRunner
 
+import click
+
 from cli_anything.comfyui import comfyui_cli as cl
 from cli_anything.comfyui.core import run as run_core
 from cli_anything.comfyui.core import session as sess
@@ -1951,3 +1953,213 @@ def test_userdata_copy_falls_over_when_the_source_is_missing(monkeypatch):
     )
     assert r.exit_code == 1 and "404" in r.output
     assert fake.saved == {}, "a failed read must not write anything"
+
+
+# ---------------------------------------------- refine round: failure is loud, everywhere
+
+
+class Dead:
+    """A client whose every method raises — the server died mid-session."""
+
+    def __init__(self, **kw):
+        pass
+
+    def __getattr__(self, name):
+        def raiser(*a, **kw):
+            raise be.ComfyError("server exploded")
+
+        return raiser
+
+
+def test_every_command_fails_loudly_when_the_server_dies(tmp_path, monkeypatch):
+    """One dead server, every command: each must exit 1 and SAY WHY, not traceback."""
+    monkeypatch.setattr(cl, "ComfyUI", Dead)
+    canvas = tmp_path / "c.json"
+    canvas.write_text(json.dumps({"nodes": [], "links": []}), encoding="utf-8")
+    graph = str(_write_api_graph(tmp_path / "g.json"))
+    mask = tmp_path / "m.png"
+    mask.write_bytes(b"PNG")
+    invocations = [
+        ["server", "free"],
+        ["server", "interrupt"],
+        ["server", "logs"],
+        ["nodes", "list"],
+        ["nodes", "search", "sampler"],
+        ["nodes", "schema", "KSampler"],
+        ["nodes", "categories"],
+        ["workflow", "deps", str(canvas)],
+        ["workflow", "info", "--path", graph],
+        ["workflow", "outputs", "--path", graph],
+        ["workflow", "validate", "--path", graph],
+        ["run", "--path", graph],
+        ["queue", "list"],
+        ["queue", "cancel", "pid-1"],
+        ["queue", "clear"],
+        ["history", "list"],
+        ["history", "outputs", "pid-1"],
+        ["assets", "mask", str(mask), "photo.png"],
+        ["assets", "download", "a.png", str(tmp_path / "out")],
+        ["userdata", "get", "a.json"],
+        ["userdata", "delete", "a.json"],
+        ["userdata", "move", "a.json", "b.json"],
+        ["userdata", "copy", "a.json", "b.json"],
+        ["models"],
+        ["models", "checkpoints"],
+    ]
+    for args in invocations:
+        r = runner.invoke(cl.cli, ["--json", *args])
+        assert r.exit_code == 1, f"{' '.join(args)} exited {r.exit_code}: {r.output}"
+        assert "server exploded" in r.output, f"{' '.join(args)} hid the failure: {r.output}"
+
+
+def test_a_missing_baseline_file_is_named_not_swallowed(tmp_path):
+    r = runner.invoke(
+        cl.cli, ["--json", "workflow", "diff", str(tmp_path / "missing.json"), "also-missing.json"]
+    )
+    assert r.exit_code == 1 and "error" in r.output
+
+
+def test_commands_that_need_a_loaded_graph_say_so(tmp_path):
+    """run/export with a session that has no workflow must not guess or crash."""
+    st = sess.new(path=str(tmp_path / "s.json"))
+    sess.save(st)
+    for args in (["run"], ["workflow", "export", "-o", str(tmp_path / "x.json")]):
+        r = runner.invoke(cl.cli, ["--json", "--session", str(tmp_path / "s.json"), *args])
+        assert r.exit_code == 1, args
+        assert "no workflow loaded" in r.output, args
+
+
+def test_dry_run_patches_but_does_not_persist(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "KSampler", "inputs": {"seed": 1}}})
+    r = runner.invoke(
+        cl.cli,
+        ["--json", "--dry-run", "--session", str(p), "workflow", "set", "1", "seed", "42"],
+    )
+    assert r.exit_code == 0, r.output
+    d = json.loads(r.output)
+    assert d["session"]["dry_run"] is True and d["session"]["saved"] is False
+    assert sess.load(str(p))["workflow"]["1"]["inputs"]["seed"] == 1, (
+        "--dry-run must leave the session file untouched"
+    )
+
+
+def test_url_and_timeout_reach_the_client(monkeypatch):
+    seen = {}
+
+    class Probe:
+        def __init__(self, **kw):
+            seen.update(kw)
+
+        def models(self, folder=None):
+            return ["a.safetensors"]
+
+    monkeypatch.setattr(cl, "ComfyUI", Probe)
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--url", "http://10.0.0.9:8188", "--timeout", "7", "--json", "models"],
+        ).output
+    )
+    assert seen["url"] == "http://10.0.0.9:8188" and seen["timeout"] == 7
+    assert d["count"] == 1
+
+
+def test_json_flag_after_the_subcommand_wins(monkeypatch):
+    class Probe:
+        def __init__(self, **kw):
+            pass
+
+        def models(self, folder=None):
+            return ["a.safetensors"]
+
+    monkeypatch.setattr(cl, "ComfyUI", Probe)
+    d = json.loads(runner.invoke(cl.cli, ["models", "--json"]).output)
+    assert d["count"] == 1
+
+
+def test_the_entrypoint_delegates_to_the_cli(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cl, "cli", lambda obj=None: seen.setdefault("obj", obj))
+    cl.main()
+    assert seen["obj"] == {}
+
+
+# ------------------------------------------------------------- refine round: the REPL
+
+
+class FakeSkin:
+    """A ReplSkin that feeds canned lines and records what the loop did to it."""
+
+    instances = []
+
+    def __init__(self, lines):
+        self.lines = list(lines)
+        self.banner = False
+        self.bye = False
+        self.helped = False
+        self.errors = []
+        FakeSkin.instances.append(self)
+
+    def print_banner(self):
+        self.banner = True
+
+    def create_prompt_session(self):
+        return None
+
+    def get_input(self, pt, project_name="", modified=False, context=""):
+        if not self.lines:
+            raise EOFError()
+        return self.lines.pop(0)
+
+    def help(self, commands):
+        self.helped = True
+
+    def error(self, message):
+        self.errors.append(message)
+
+    def print_goodbye(self):
+        self.bye = True
+
+
+def _patch_skin(monkeypatch, lines):
+    skin = FakeSkin(lines)
+    monkeypatch.setattr("cli_anything.comfyui.utils.repl_skin.ReplSkin", lambda *a, **kw: skin)
+    return skin
+
+
+def test_the_repl_banner_helps_dispatches_and_exits(tmp_path, monkeypatch):
+    skin = _patch_skin(monkeypatch, ["", "help", "traps --id nope", "exit"])
+    r = runner.invoke(cl.cli, ["--session", str(tmp_path / "s.json")])
+    assert r.exit_code == 0, r.output
+    assert skin.banner and skin.helped and skin.bye
+    assert skin.errors == [], "a SystemExit from die() is a normal REPL answer, not an error"
+
+
+def test_the_repl_survives_a_crashing_command(tmp_path, monkeypatch):
+    skin = _patch_skin(monkeypatch, ["definitely-not-a-command", "exit"])
+    r = runner.invoke(cl.cli, ["--session", str(tmp_path / "s.json")])
+    assert r.exit_code == 0, r.output
+    assert skin.errors, "the failure must be reported through the skin, not vanish"
+    assert skin.bye, "and the REPL keeps running afterwards"
+
+
+@pytest.mark.parametrize("sentinel", [EOFError, KeyboardInterrupt])
+def test_the_repl_leaves_on_eof_and_interrupt(tmp_path, monkeypatch, sentinel):
+    skin = FakeSkin([])
+
+    def get_input(pt, project_name="", modified=False, context=""):
+        raise sentinel()
+
+    skin.get_input = get_input
+    monkeypatch.setattr("cli_anything.comfyui.utils.repl_skin.ReplSkin", lambda *a, **kw: skin)
+    r = runner.invoke(cl.cli, ["--session", str(tmp_path / "s.json")])
+    assert r.exit_code == 0 and skin.bye and not skin.helped
+
+
+def test_no_subcommand_enters_the_repl(tmp_path, monkeypatch):
+    entered = []
+    fake_repl = click.Command("repl", callback=lambda: entered.append(True))
+    monkeypatch.setattr(cl, "repl", fake_repl)
+    r = runner.invoke(cl.cli, [])
+    assert r.exit_code == 0, r.output
+    assert entered == [True]
