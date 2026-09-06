@@ -332,3 +332,19 @@ Same gate, after the refine pass:
 - Two new commands, unit-tested: `nodes categories` (discovery half of
   `nodes list --category`) and `workflow outputs` (the file-writing nodes of
   the loaded graph or a `--path`, composes with `run --download`).
+
+## 2026-09-06 — userdata refinement
+
+The gap found this pass: the server's `/userdata` API — CRUD over the
+`user/default/workflows/` tree the canvas `Save` button writes to — was not
+wrapped anywhere, even though the 48-canvas archive lives there.
+
+- `comfyui_backend.py`: `userdata_list` (GET /userdata?dir=&recurse=&full_info=),
+  `userdata_get` (raw bytes), `userdata_put` (bytes or dict, `?overwrite=`),
+  `userdata_delete`.
+- New `userdata` command group in the CLI: `list [DIR] --no-recurse
+  --full-info`, `get PATH [--out FILE]`, `put PATH [FILE] | --text
+  [--no-overwrite]`, `delete PATH`.
+- 12 new unit tests (backend wire format + CLI behaviour, including 404/409
+  surfacing) and one live-server E2E round trip. 123 unit tests, all passing;
+  total coverage 93.5%.

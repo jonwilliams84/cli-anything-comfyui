@@ -409,3 +409,19 @@ class TestCLIRefineSubprocess:
             ["--json", "--session", sess, "workflow", "unset", "1", "nope"], check=False
         )
         assert proc.returncode != 0 and "no input 'nope'" in (proc.stdout + proc.stderr)
+
+
+def test_userdata_round_trip_against_the_live_server(client):
+    """The /userdata API: save, read back, list, delete a converted graph."""
+    p = f"cli-anything-e2e/userdata-roundtrip-{os.getpid()}.json"
+    try:
+        res = client.userdata_put(p, {"ok": True, "from": "e2e"})
+        assert res is not None
+        blob = client.userdata_get(p)
+        assert json.loads(blob)["ok"] is True, "the bytes round-trip verbatim"
+        listed = client.userdata_list("cli-anything-e2e")
+        assert any("userdata-roundtrip" in str(x) for x in listed)
+    finally:
+        client.userdata_delete(p)
+    with pytest.raises(Exception):
+        client.userdata_get(p), "deleted means deleted"
