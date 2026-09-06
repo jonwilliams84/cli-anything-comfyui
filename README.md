@@ -39,6 +39,7 @@ cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
 cli-anything-comfyui run --extra-data '{"filename": "job1"}'   # metadata with the prompt
 cli-anything-comfyui queue wait canvas-pid --download ./out   # await a prompt queued elsewhere
+cli-anything-comfyui history show canvas-pid                   # why a render failed: the server's execution messages
 cli-anything-comfyui history clear --id canvas-pid             # prune one finished prompt
 cli-anything-comfyui assets upload mask.png --kind temp --no-overwrite
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between

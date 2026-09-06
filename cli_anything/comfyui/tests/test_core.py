@@ -507,6 +507,34 @@ OUT_ENTRY = {
     "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}}
 }
 
+# A failed render's history entry, shaped like the real one: the graph that ran,
+# the files it wrote before dying, and the status.messages rows that are the
+# ONLY place the server records why it died.
+ERR_ENTRY = {
+    "prompt": {
+        "1": {"class_type": "KSampler", "inputs": {"seed": 1}},
+        "3": {"class_type": "VAEDecode", "inputs": {}},
+    },
+    "outputs": {"9": {"images": [{"filename": "a.png", "subfolder": "", "type": "output"}]}},
+    "status": {
+        "status_str": "error",
+        "completed": False,
+        "messages": [
+            ["execution_start", {"prompt_id": "pid-err"}],
+            [
+                "execution_error",
+                {
+                    "node_id": "3",
+                    "node_type": "VAEDecode",
+                    "exception_type": "OutOfMemoryError",
+                    "exception_message": "CUDA out of memory",
+                    "traceback": ["  frame 1", "  frame 2"],
+                },
+            ],
+        ],
+    },
+}
+
 
 def test_submit_and_wait_flattens_the_outputs():
     res = run_core.submit_and_wait(FakeClient(outputs=OUT_ENTRY), {"1": {"class_type": "X"}})
@@ -1057,7 +1085,11 @@ class FakeServer:
 
     def history(self, prompt_id=None, max_items=None):
         if prompt_id:
-            return {"pid-9": OUT_ENTRY} if prompt_id == "pid-9" else {}
+            if prompt_id == "pid-9":
+                return {"pid-9": OUT_ENTRY}
+            if prompt_id == "pid-err":
+                return {"pid-err": ERR_ENTRY}
+            return {}
         return {
             "pid-9": OUT_ENTRY,
             "pid-8": {"outputs": {}, "status": {"status_str": "success"}},
@@ -1128,6 +1160,120 @@ def test_history_list_and_outputs_with_download(monkeypatch, tmp_path):
     )
     assert d["output_count"] == 1 and d["download"]["downloaded"] == 1
     assert (dest / "a.png").read_bytes()[:4] == b"\x89PNG"
+
+
+def test_history_show_surfaces_the_execution_messages_of_a_failed_prompt(monkeypatch):
+    """The reason `history show` exists: a failed render gets a history entry,
+    and the ONLY place the server says why is that entry's status.messages.
+    `list` and `outputs` both hide it."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "history", "show", "pid-err"]).output)
+    assert d["status"] == "error" and d["completed"] is False
+    assert d["graph_nodes"] == 2
+    assert d["output_count"] == 1 and d["outputs"][0]["filename"] == "a.png"
+    events = [m["event"] for m in d["messages"]]
+    assert events == ["execution_start", "execution_error"]
+    err = d["messages"][1]
+    assert err["node_id"] == "3" and err["exception_type"] == "OutOfMemoryError"
+    assert err["exception_message"] == "CUDA out of memory"
+    # An error entry must fail the invocation, so `history show && …` chains stop.
+    r = runner.invoke(cl.cli, ["history", "show", "pid-err"])
+    assert r.exit_code == 1
+    assert "error on node 3 (VAEDecode): OutOfMemoryError: CUDA out of memory" in r.output
+    assert "execution_start" in r.output and "[images] a.png" in r.output
+
+
+def test_history_show_defaults_to_the_session_prompt(monkeypatch, tmp_path):
+    """Without an id it reads the session's last_prompt_id — same default as
+    `history outputs`, so a `run` failure can be inspected bare-handed."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    st = sess.load(str(p))
+    st["last_prompt_id"] = "pid-9"
+    sess.save(st)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "--session", str(p), "history", "show"]).output)
+    assert d["prompt_id"] == "pid-9" and d["status"] == ""
+    assert d["completed"] is True, "an entry with no status block counts as finished"
+    assert d["graph_nodes"] is None and d["output_count"] == 1
+    r = runner.invoke(cl.cli, ["--session", str(p), "history", "show"])
+    assert r.exit_code == 0 and "prompt pid-9" in r.output
+
+
+def test_history_show_graph_writes_the_graph_that_ran(monkeypatch, tmp_path):
+    """`--graph` hands back the exact API graph the server ran — re-runnable
+    via `run --path`, diffable via `workflow diff`. The graph is written even
+    though the failed entry exits 1: a failure is exactly when you need it."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    out = tmp_path / "ran" / "graph.json"
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "history", "show", "pid-err", "--graph", str(out)]).output
+    )
+    assert d["graph_nodes"] == 2 and d["graph"] == str(out)
+    ran = json.loads(out.read_text(encoding="utf-8"))
+    assert ran["1"]["class_type"] == "KSampler", "the graph that RAN, not the session's"
+    assert (
+        "wrote the graph that ran"
+        in runner.invoke(cl.cli, ["history", "show", "pid-err", "--graph", str(out)]).output
+    )
+
+
+def test_history_show_refuses_a_graph_when_the_entry_has_none(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    out = tmp_path / "graph.json"
+    r = runner.invoke(cl.cli, ["--json", "history", "show", "pid-9", "--graph", str(out)])
+    assert r.exit_code == 1 and "carries no graph" in r.output
+    assert not out.exists()
+
+
+def test_history_show_says_so_when_there_is_no_entry_or_no_id(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "history", "show"])
+    assert r.exit_code == 1 and "no prompt id given" in r.output
+    r = runner.invoke(cl.cli, ["--json", "history", "show", "pid-nobody"])
+    assert r.exit_code == 1 and "no history for prompt pid-nobody" in r.output
+    assert "queue list" in r.output
+
+
+def test_history_show_skips_malformed_message_rows(monkeypatch):
+    """A status.messages row that is not an [event, data] pair is skipped, not
+    a crash — the server has shipped odd rows here before. A pair whose data is
+    a bare string becomes a `detail`, and a long message list is truncated with
+    a count rather than flooding the terminal."""
+
+    class Odd(be.ComfyUI):
+        def __init__(self, **kw):
+            pass
+
+        def history(self, prompt_id=None, max_items=None):
+            rows = [
+                "not-a-pair",
+                ["bare-event"],
+                ["progress", {"value": 5}],
+                ["note", "server said something odd"],
+                None,
+            ]
+            rows += [[f"event-{i}"] for i in range(12)]
+            return {
+                "pid-odd": {
+                    "status": {"status_str": "success", "completed": True, "messages": rows}
+                }
+            }
+
+    monkeypatch.setattr(cl, "ComfyUI", Odd)
+    r = runner.invoke(cl.cli, ["history", "show", "pid-odd"])
+    assert r.exit_code == 0
+    assert "… and 5 more message(s)" in r.output, "only the first ten lines flood the screen"
+    d = json.loads(runner.invoke(cl.cli, ["--json", "history", "show", "pid-odd"]).output)
+    events = [m["event"] for m in d["messages"]]
+    assert events[:4] == ["bare-event", "progress", "note", "event-0"]
+    assert d["messages"][2]["detail"] == "server said something odd"
+    assert d["messages"][1]["value"] == 5
+    assert d["status"] == "success" and d["completed"] is True
 
 
 def test_history_clear_wipes_all_or_one_prompt(monkeypatch):
@@ -2106,6 +2252,7 @@ def test_every_command_fails_loudly_when_the_server_dies(tmp_path, monkeypatch):
         ["queue", "cancel", "pid-1"],
         ["queue", "clear"],
         ["history", "list"],
+        ["history", "show", "pid-1"],
         ["history", "outputs", "pid-1"],
         ["assets", "mask", str(mask), "photo.png"],
         ["assets", "download", "a.png", str(tmp_path / "out")],

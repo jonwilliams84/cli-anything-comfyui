@@ -481,3 +481,26 @@ test had ever walked.
   `kind`, and `userdata_put` with raw bytes.
 - 8 new unit tests in `test_core.py`; 178 total, all passing.
 - Coverage: 100% statements, 100% branches, 0 partial — up from 99.36%.
+
+## 2026-09-06 — refine round 14: `history show`
+
+One new command, aimed at the question every failed render asks and no existing
+command could answer: WHY did it fail.
+
+- **`history show [PROMPT_ID] [--graph PATH]`** — one history entry in full:
+  its status, the server's execution messages (the execution_error rows with
+  node id, node type, exception type and message — the same text the canvas GUI
+  would pop up), and the files it produced. `history list` gives counts and
+  `history outputs` gives files; neither surfaces the failure detail, which the
+  server records ONLY in the entry's status.messages. Defaults to the session's
+  `last_prompt_id` like `history outputs` does; exits 1 when the entry reports
+  an error, so `history show && next-step` chains stop at the failure.
+- `--graph PATH` writes the exact API-format graph the server ran — the entry's
+  `prompt` field, unreachable before — re-runnable with `run --path` and
+  diffable with `workflow diff`. Written even when the entry failed (that is
+  when it is needed); refused loudly when the entry carries no graph.
+- 5 new unit tests in `test_core.py`: the failed-entry payload and exit code,
+  the session-id default, `--graph` writing and refusing, the no-id/no-entry
+  errors, and malformed status.messages rows (non-pairs, bare events, string
+  data, >10 rows truncated). 184 total, all passing.
+- Coverage: 100% statements, 100% branches.

@@ -85,8 +85,11 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest
     queue      list / wait <id> / cancel / clear
-    history    list / outputs / clear (the canvas's Clear-history button, as an
-               API call: POST /history with {"clear": true} or {"delete": [ids]})
+    history    list / show <id> / outputs / clear (the canvas's Clear-history
+               button, as an API call: POST /history with {"clear": true} or
+               {"delete": [ids]}; `show` reads the entry's status.messages —
+               the execution_error rows listing WHICH node failed and why —
+               and can write the graph that ran out with --graph)
     assets     upload an input (--kind input/temp/output, --no-overwrite makes
                the server answer 409 instead of silently replacing),
                upload an inpainting mask, download an output

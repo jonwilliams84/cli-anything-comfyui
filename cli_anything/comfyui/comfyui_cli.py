@@ -942,6 +942,86 @@ def history_list(ctx, limit, json_):
     )
 
 
+@history.command("show")
+@click.argument("prompt_id", required=False)
+@click.option(
+    "--graph",
+    "graph_out",
+    default=None,
+    type=click.Path(),
+    help="Write the exact graph that ran here (API format — re-runnable, diffable).",
+)
+@json_option
+@click.pass_context
+def history_show(ctx, prompt_id, graph_out, json_):
+    """One entry in full: status, the server's execution messages, outputs.
+
+    `history list` gives counts and `history outputs` gives files; neither says
+    WHY a render failed. That detail lives in the entry's status messages — the
+    execution_error rows with the node id and exception the canvas GUI would
+    have popped up. Exits 1 when the entry reports an error, so a
+    `history show && …` chain stops at the failure.
+    """
+    _merge_json(ctx, json_)
+    pid = prompt_id or _state(ctx).get("last_prompt_id")
+    if not pid:
+        die("no prompt id given and none in the session. Try: history list")
+    try:
+        entry = (client(ctx).history(pid) or {}).get(pid)
+    except ComfyError as exc:
+        die(str(exc))
+    if not entry:
+        die(f"no history for prompt {pid} — it may still be queued (queue list)")
+    status = entry.get("status") or {}
+    messages = []
+    for m in status.get("messages") or []:
+        if not isinstance(m, (list, tuple)) or not m:
+            continue  # a row that is not an [event, data] pair — skip, don't crash
+        data = m[1] if len(m) > 1 else None
+        row = {"event": m[0]}
+        if isinstance(data, dict):
+            row.update(data)
+        elif data is not None:
+            row["detail"] = data
+        messages.append(row)
+    ran = entry.get("prompt")
+    files = outputs_of(entry)
+    payload = {
+        "prompt_id": pid,
+        "status": status.get("status_str") or "",
+        "completed": bool(status.get("completed", True)),
+        "messages": messages,
+        "graph_nodes": len(ran) if isinstance(ran, dict) else None,
+        "output_count": len(files),
+        "outputs": files,
+    }
+    lines = [f"prompt {pid}: {payload['status'] or 'no status recorded'}"]
+    for m in messages[:10]:
+        if m["event"] == "execution_error":
+            lines.append(
+                f"  error on node {m.get('node_id')} ({m.get('node_type')}): "
+                f"{m.get('exception_type')}: {m.get('exception_message')}"
+            )
+        else:
+            lines.append(f"  {m['event']}")
+    if len(messages) > 10:
+        lines.append(f"  … and {len(messages) - 10} more message(s)")
+    for f in files[:10]:
+        lines.append(f"  [{f['bucket']}] {f['filename']}")
+    if graph_out:
+        if not isinstance(ran, dict):
+            die("this history entry carries no graph to write")
+        out = os.path.abspath(os.path.expanduser(graph_out))
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        with open(out, "w", encoding="utf-8") as fh:
+            _json.dump(ran, fh, indent=2, sort_keys=True)
+        payload["graph"] = out
+        lines.append(f"  wrote the graph that ran to {out}")
+    emit(ctx, payload, lines)
+    if (status.get("status_str") or "").strip().lower() == "error":
+        sys.exit(1)
+
+
 @history.command("clear")
 @click.option(
     "--id", "prompt_id", default=None, help="Delete just this prompt's entry instead of all."
