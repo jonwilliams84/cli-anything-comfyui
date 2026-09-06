@@ -21,8 +21,10 @@ harness is an HTTP client to the REAL ComfyUI, exactly as the browser is:
     GET  /object_info         EVERY node type and its input schema (1805 on this box)
     GET  /models/{folder}     installed models per folder
     POST /upload/image        put a file in the input dir
+    POST /upload/mask         put an inpainting MASK in, tied to its original image
     GET  /view                fetch an output by filename/subfolder/type
     GET  /system_stats        versions, argv, devices, VRAM
+    GET  /internal/logs       the server's own log lines (newer builds)
     GET  /ws                  progress events while a prompt executes
 
 `comfy-cli` exists but installs and manages ComfyUI; it does not drive a running
@@ -71,16 +73,17 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
 
 ### Command groups
 
-    server     status / features / embeddings / free / interrupt
+    server     status / features / embeddings / free / interrupt / logs
     nodes      list, search, schema, categories — the 1805 types and what each
                input is called, discoverable by category prefix
-    workflow   convert (UI→API), validate, info, outputs, deps, get/set a node input
+    workflow   convert (UI→API), validate, info, outputs, deps, get/set/unset a
+               node input, export the patched graph, diff it against a file
     run        submit a graph and wait, with progress
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest
     queue      list / cancel / clear
     history    list / get / outputs
-    assets     upload an input, download an output
+    assets     upload an input, upload an inpainting mask, download an output
     models     what is installed, per folder
     review     sample frames from produced media into a contact sheet
     traps      the recorded failure catalogue for this software

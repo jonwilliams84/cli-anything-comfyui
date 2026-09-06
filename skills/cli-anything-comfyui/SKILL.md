@@ -20,13 +20,14 @@ Desktop app, or `python main.py --listen 0.0.0.0 --port 8188`) or set
 
 ## Command groups
 
-- `server` — `status`, `free` (unload models / free VRAM), `interrupt`
+- `server` — `status`, `free` (unload models / free VRAM), `interrupt`, `logs`
 - `nodes` — `list`, `search <text>`, `schema <ClassType>`
-- `workflow` — `convert`, `deps`, `info`, `find`, `set`, `validate`
+- `workflow` — `convert`, `deps`, `info`, `find`, `set`, `unset`, `validate`,
+  `export`, `diff`
 - `run` — queue the loaded graph, wait, report outputs
 - `queue` — `list`, `cancel <prompt_id>`, `clear`
 - `history` — `list`, `outputs [prompt_id]`
-- `assets` — `upload <file>`, `download <filename> <dest>`
+- `assets` — `upload <file>`, `mask <file> <original_ref>`, `download <filename> <dest>`
 - `models` — model folders and their contents
 - `traps` — recorded failure modes for this software
 - `status` — session + server state
@@ -71,6 +72,15 @@ and the reason. Read it rather than retrying blind.
 
 **`--dry-run`** suppresses the session save for any mutation.
 
+**`workflow diff FILE`** answers "what did I change since the render that
+worked" — the file is the baseline, the patched session graph is the current
+state. `workflow unset NODE INPUT` removes an override instead of guessing a
+replacement; `workflow export -o out.json` writes the patched graph to disk.
+
+**`assets mask FILE ORIGINAL_REF`** uploads an inpainting mask tied to the
+image it belongs to. Without ORIGINAL_REF the server files the mask as a loose
+picture and the inpaint graph masks nothing.
+
 **`traps`** lists what has actually gone wrong on this estate, with the fix for
 each. Read it before debugging from first principles.
 
@@ -79,6 +89,7 @@ each. Read it before debugging from first principles.
 - `server status` → `{up, comfyui_version, os, devices[{name, vram_free_gb}], argv}`
 - `workflow convert` → `{nodes, dropped[], warnings[], missing_node_types[], subgraphs[]}`
 - `workflow info` → `{nodes, output_nodes[], by_class_type{}}`
+- `workflow diff` → `{baseline, same, added[], removed[], changed[{node, class_type, changes[{input, from, to}]}]}`
 - `run` → `{prompt_id, elapsed_s, output_count, outputs[{bucket, filename, subfolder, type}]}`
 - `nodes schema X` → `inputs[{name, type, widget, control_after_generate, default, choices}]`
 

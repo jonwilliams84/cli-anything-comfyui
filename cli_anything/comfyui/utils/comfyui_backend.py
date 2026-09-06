@@ -264,6 +264,55 @@ class ComfyUI:
             timeout=max(self.timeout, 300),
         )
 
+    def upload_mask(self, path, original_ref, kind="temp"):
+        """Multipart upload of an inpainting MASK (POST /upload/mask).
+
+        Not the same call as `upload_image`: the server needs `original_ref` —
+        the name of the image the mask belongs to — so it can line the mask up
+        with the original instead of filing it as a loose picture. Without it
+        an inpaint graph silently masks nothing.
+        """
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isfile(path):
+            raise ComfyError(f"no such file: {path}")
+        name = os.path.basename(path)
+        ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        boundary = f"----comfycli{uuid.uuid4().hex}"
+        parts = []
+        for key, val in (("original_ref", original_ref), ("type", kind)):
+            if val:
+                parts.append(
+                    f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"'
+                    f"\r\n\r\n{val}\r\n".encode()
+                )
+        with open(path, "rb") as fh:
+            blob = fh.read()
+        parts.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="image"; '
+            f'filename="{name}"\r\nContent-Type: {ctype}\r\n\r\n'.encode()
+            + blob
+            + b"\r\n"
+        )
+        parts.append(f"--{boundary}--\r\n".encode())
+        return self._request(
+            "POST",
+            "/upload/mask",
+            b"".join(parts),
+            {"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            timeout=max(self.timeout, 300),
+        )
+
+    def logs(self, limit=None):
+        """The server's own log lines (GET /internal/logs), oldest first.
+
+        A rejected prompt tells you WHAT was refused; the log tells you what
+        happened around it — the OOM warning, the missing pack, the failed
+        checkpoint load. Newer ComfyUI builds expose this; an older one answers
+        HTTP 404, which surfaces as an ordinary ComfyError.
+        """
+        q = f"?limit={int(limit)}" if limit else ""
+        return self._request("GET", f"/internal/logs{q}")
+
     def view(self, filename, subfolder="", kind="output"):
         """Raw bytes of one produced file."""
         q = urllib.parse.urlencode({"filename": filename, "subfolder": subfolder, "type": kind})

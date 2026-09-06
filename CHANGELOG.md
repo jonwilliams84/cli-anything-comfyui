@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.4.0] — 2026-09-06
+
+- Updated `comfyui.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/core/workflow.py`, `cli_anything/comfyui/skills/skill.md`, `cli_anything/comfyui/tests/test.md` and 4 more. (11 files changed, 656 insertions(+), 14 deletions(-))
+
 ## [0.3.0] — 2026-09-06
 
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (7 files changed, 396 insertions(+), 2 deletions(-))
@@ -11,6 +15,28 @@ All notable changes to this project are documented here.
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (7 files changed, 556 insertions(+), 8 deletions(-))
 
 ## [Unreleased]
+
+Third refine pass — the patch loop and the two missing server surfaces:
+
+- **`workflow unset`** — the honest inverse of `workflow set`: removes an input
+  override so the node falls back to its schema default or its link, instead of
+  baking a guessed replacement value in. Auto-saves unless `--dry-run`.
+- **`workflow export -o FILE`** — writes the CURRENT session graph (every
+  `workflow set` included) to disk. `workflow convert -o` only wrote the freshly
+  converted canvas; patches used to be trapped in the session.
+- **`workflow diff [A] [B]`** — what changed between two graphs, node by node
+  and input by input (a rewire is just an input whose `[id, slot]` value
+  changed). One path diffs that file, as baseline, against the patched session
+  graph: "what did I change since the render that worked".
+- **`assets mask FILE ORIGINAL_REF`** — `POST /upload/mask`, the inpainting
+  path. Without `original_ref` the server files the mask as a loose picture and
+  the inpaint graph masks nothing.
+- **`server logs`** — `GET /internal/logs` (newer ComfyUI builds): a rejected
+  prompt says WHAT was refused; the log says what happened around it.
+- Unit suite expanded from 75 to 92 tests; total coverage 85.52% → 86.64% with
+  ~120 new statements. E2E suite gained the `/internal/logs` read, a real mask
+  upload against a rendered image, and a set → export → diff → unset
+  subprocess round trip that must end identical to its source.
 
 Second refine pass — CLI surface completeness and coverage of what already shipped:
 

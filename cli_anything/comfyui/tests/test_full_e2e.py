@@ -312,3 +312,100 @@ class TestCLISubprocess:
         proc = self._run(["workflow", "convert", graph], check=False)
         assert proc.returncode != 0
         assert "DefinitelyNotInstalled" in (proc.stdout + proc.stderr)
+
+
+# ---------------------------------------------- refine round 2: iterate & repro
+
+
+def test_internal_logs_are_readable(client):
+    """Newer ComfyUI builds expose the server's own log lines."""
+    res = client.logs(limit=20)
+    entries = res.get("entries") if isinstance(res, dict) else res
+    assert entries is not None, f"unexpected /internal/logs reply: {str(res)[:200]}"
+
+
+def test_a_mask_upload_is_accepted_for_a_rendered_image(client, object_info, tmp_path):
+    """The inpainting path: render, fetch the png, upload it back as a mask."""
+    res = run_core.submit_and_wait(client, _minimal_graph(object_info), timeout=300)
+    got = run_core.fetch(client, res["outputs"], str(tmp_path))
+    src = got["files"][0]
+    up = client.upload_mask(src["path"], src["filename"])
+    assert up.get("name"), f"mask upload returned no name: {up}"
+    print(f"\n  mask filed as {up.get('subfolder', '')}/{up['name']} for {src['filename']}")
+
+
+class TestCLIRefineSubprocess:
+    """The round-2 commands, through the installed CLI only."""
+
+    CLI_BASE = _resolve_cli("cli-anything-comfyui")
+
+    def _run(self, args, check=True):
+        proc = subprocess.run(
+            self.CLI_BASE + args, capture_output=True, text=True, timeout=600, check=False
+        )
+        if check:
+            assert proc.returncode == 0, f"{args} -> {proc.returncode}\n{proc.stderr[-2000:]}"
+        return proc
+
+    def _seed_graph(self, tmp_path):
+        sess = str(tmp_path / "s.json")
+        graph = str(tmp_path / "g.json")
+        with open(graph, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "1": {
+                        "class_type": "EmptyImage",
+                        "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                    },
+                    "2": {
+                        "class_type": "SaveImage",
+                        "inputs": {"images": ["1", 0], "filename_prefix": "cli_e2e_orig"},
+                    },
+                },
+                fh,
+            )
+        self._run(["--json", "--session", sess, "workflow", "convert", graph])
+        return sess, graph
+
+    def test_server_logs(self):
+        d = json.loads(self._run(["--json", "server", "logs"]).stdout)
+        assert "entries" in d
+
+    def test_set_export_diff_unset_roundtrip(self, tmp_path):
+        """set -> export -> diff -> unset, ending where it started."""
+        sess, graph = self._seed_graph(tmp_path)
+        self._run(
+            [
+                "--json",
+                "--session",
+                sess,
+                "workflow",
+                "set",
+                "2",
+                "filename_prefix",
+                "cli_e2e_patched",
+            ]
+        )
+        exported = str(tmp_path / "patched.json")
+        d = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "export", "-o", exported]).stdout
+        )
+        assert d["nodes"] == 2 and os.path.exists(exported)
+        diff = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "diff", graph]).stdout
+        )
+        assert diff["changed"][0]["changes"] == [
+            {"input": "filename_prefix", "from": "cli_e2e_orig", "to": "cli_e2e_patched"}
+        ]
+        self._run(["--json", "--session", sess, "workflow", "unset", "2", "filename_prefix"])
+        diff2 = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "diff", graph]).stdout
+        )
+        assert diff2["same"] is True, "unset did not restore the graph"
+
+    def test_unset_on_an_unknown_input_fails_loudly(self, tmp_path):
+        sess, _ = self._seed_graph(tmp_path)
+        proc = self._run(
+            ["--json", "--session", sess, "workflow", "unset", "1", "nope"], check=False
+        )
+        assert proc.returncode != 0 and "no input 'nope'" in (proc.stdout + proc.stderr)

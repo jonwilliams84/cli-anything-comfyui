@@ -30,12 +30,16 @@ cli-anything-comfyui --version
 ```bash
 cli-anything-comfyui server status              # version, devices, free VRAM
 cli-anything-comfyui server features            # the server's feature flags
+cli-anything-comfyui server logs                # the server's own recent log lines
 cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, which are links
 cli-anything-comfyui nodes categories           # category prefixes installed here, with counts
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
 cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
+cli-anything-comfyui workflow unset 3 seed      # remove one input override
+cli-anything-comfyui workflow export -o p.json  # write the patched session graph to disk
+cli-anything-comfyui workflow diff my.json      # what changed since that file was converted
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between
 cli-anything-comfyui traps                      # the recorded ways this goes wrong
@@ -66,6 +70,11 @@ reported: 22 want rgthree, 5 want KJNodes' Get/SetNode, 2 want GGUF.
 gifs, videos, audio — because code that reads only `images` finds nothing for
 every video workflow. A graph with no output node is flagged before it wastes a
 render.
+
+**Keeping the patch loop honest.** `workflow set` patches the session graph;
+`workflow diff` answers "what did I change since the render that worked",
+`workflow unset` removes an override instead of guessing a replacement value,
+and `workflow export` writes the patched graph to disk so it can be handed on.
 
 ## Session
 
