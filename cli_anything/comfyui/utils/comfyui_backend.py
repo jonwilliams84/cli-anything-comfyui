@@ -123,7 +123,9 @@ class ComfyUI:
             # S310/B310: the scheme is pinned to http/https by _http_only()
             # when the client is constructed, so `file:` and custom schemes
             # cannot reach here.
-            opened = urllib.request.urlopen(req, timeout=timeout or self.timeout)  # noqa: S310
+            opened = urllib.request.urlopen(  # noqa: S310  # nosec B310
+                req, timeout=timeout or self.timeout
+            )
             with opened as r:
                 payload = r.read()
         except urllib.error.HTTPError as exc:
