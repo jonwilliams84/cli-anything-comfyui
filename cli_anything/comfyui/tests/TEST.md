@@ -12,8 +12,8 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — ~114 unit tests, synthetic graphs and a fake client, no server
-- `test_full_e2e.py` — ~25 tests against the real server, including subprocess
+- `test_core.py` — 202 unit tests, synthetic graphs and a fake client, no server
+- `test_full_e2e.py` — ~30 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
 
@@ -504,3 +504,34 @@ command could answer: WHY did it fail.
   errors, and malformed status.messages rows (non-pairs, bare events, string
   data, >10 rows truncated). 184 total, all passing.
 - Coverage: 100% statements, 100% branches.
+
+## 2026-09-06 — refine round 15: `workflow models`
+
+One new command, closing the third leg of pre-flight. `workflow deps` checks
+node TYPES and `workflow validate` checks graph SHAPE; both pass a graph whose
+CheckpointLoaderSimple names a checkpoint that is not on disk, and that graph
+queues clean and dies seconds into execution — after the queue slot was spent.
+Nothing exposed whether the model FILES exist.
+
+- **`workflow models [PATH]`** — every widget input ending in `_name` (the way
+  core loaders and the relevant packs spell a filename: `ckpt_name`, `lora_name`,
+  `vae_name`, `clip_name`, `unet_name`, `control_net_name`, `model_name`) is
+  checked against the server's own `GET /models` listings across ALL folders.
+  Membership anywhere, not in a predicted folder: the folder a node pack files
+  its models under is not guessable. Reports each ref with `installed_in` and
+  exits 1 when something is missing, so `workflow models g.json && run` stops
+  before a wasted queue slot. A graph with no model refs never polls /models
+  at all, so a folder outage cannot fail an irrelevant check.
+- New core functions in `core/workflow.py`: `model_refs` (the filename-naming
+  widget inputs, link-wired and undeclared-schema inputs excluded),
+  `index_models` (filename -> folders, a folder that refuses to list is skipped
+  not fatal), `check_models` (the join, with the no-refs fast path).
+- 9 new unit tests in `test_core.py` (refs vs links/scalars/unknown types,
+  the index build including a multi-folder file and a refusing folder, hits and
+  misses joined, the no-refs no-server-call fast path, and the CLI pass/exit-1/
+  zero-refs paths). 202 total, all passing. Coverage: 100% statements, 100%
+  branches.
+- 3 new E2E subprocess tests in `test_full_e2e.py`: a loader-free graph is ok
+  with zero refs, a REAL checkpoint from the server's `checkpoints` folder comes
+  back installed with that folder named, and a fabricated filename exits 1
+  naming the missing file.

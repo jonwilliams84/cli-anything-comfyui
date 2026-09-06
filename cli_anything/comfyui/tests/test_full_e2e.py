@@ -229,6 +229,64 @@ class TestCLISubprocess:
         d = json.loads(self._run(["--json", "models"]).stdout)
         assert d["count"] > 0
 
+    def test_workflow_models_on_a_graph_with_no_loaders_is_ok(self, tmp_path):
+        g = str(tmp_path / "g.json")
+        with open(g, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "1": {
+                        "class_type": "EmptyImage",
+                        "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                    },
+                    "2": {
+                        "class_type": "SaveImage",
+                        "inputs": {"images": ["1", 0], "filename_prefix": "e2e_models"},
+                    },
+                },
+                fh,
+            )
+        d = json.loads(self._run(["--json", "workflow", "models", g]).stdout)
+        assert d["ok"] is True and d["count"] == 0 and d["folders_scanned"] == 0
+
+    def test_workflow_models_verifies_a_model_that_is_really_there(self, tmp_path):
+        """The third leg of pre-flight: deps (node TYPES) + validate (SHAPE) +
+        models (FILES). A checkpoint the server lists must come back installed,
+        with the folder that holds it named."""
+        c = ComfyUI()
+        files = c.models("checkpoints")
+        if isinstance(files, dict):
+            files = list(files)
+        files = [f for f in (files or []) if isinstance(f, str)]
+        if not files:
+            pytest.skip("this server has no checkpoints to verify against")
+        graph = str(tmp_path / "g.json")
+        with open(graph, "w", encoding="utf-8") as fh:
+            json.dump(
+                {"4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": files[0]}}},
+                fh,
+            )
+        d = json.loads(self._run(["--json", "workflow", "models", graph]).stdout)
+        assert d["ok"] is True and d["count"] == 1 and d["missing_count"] == 0
+        assert "checkpoints" in d["refs"][0]["installed_in"]
+
+    def test_workflow_models_names_a_missing_model_and_exits_1(self, tmp_path):
+        graph = str(tmp_path / "g.json")
+        with open(graph, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "4": {
+                        "class_type": "CheckpointLoaderSimple",
+                        "inputs": {"ckpt_name": "cli-anything-not-on-disk.safetensors"},
+                    }
+                },
+                fh,
+            )
+        proc = self._run(["--json", "workflow", "models", graph], check=False)
+        assert proc.returncode == 1
+        d = json.loads(proc.stdout)
+        assert d["ok"] is False and d["missing_count"] == 1
+        assert d["missing"][0]["model"] == "cli-anything-not-on-disk.safetensors"
+
     @pytest.mark.skipif(not os.path.isdir(CORPUS), reason="canvas corpus not mounted")
     def test_convert_then_info_on_a_real_canvas(self, tmp_path):
         canvas = os.path.join(CORPUS, "Minimax H3 - Text to image.json")

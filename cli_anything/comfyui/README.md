@@ -34,6 +34,7 @@ cli-anything-comfyui server logs                # the server's own recent log li
 cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, which are links
 cli-anything-comfyui nodes categories           # category prefixes installed here, with counts
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
+cli-anything-comfyui workflow models my-api.json  # are the model FILES it names on the server
 cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
@@ -80,6 +81,14 @@ render.
 `workflow diff` answers "what did I change since the render that worked",
 `workflow unset` removes an override instead of guessing a replacement value,
 and `workflow export` writes the patched graph to disk so it can be handed on.
+
+**Checking the graph will not die mid-render.** Three pre-flight checks, each
+covering what the others cannot: `workflow deps` (node TYPES), `workflow
+validate` (graph SHAPE), and `workflow models` (model FILES — every widget input
+ending in `_name`, checked against the server's own `/models` listings, all
+folders). Both of the first two pass a graph whose CheckpointLoaderSimple names
+a checkpoint that is not on disk; that graph queues clean and dies seconds into
+execution. `workflow models` exits 1 when something is missing.
 
 ## Session
 

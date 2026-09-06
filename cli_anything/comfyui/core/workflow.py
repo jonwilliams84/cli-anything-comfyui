@@ -28,6 +28,8 @@ from __future__ import annotations
 import json
 import os
 
+from cli_anything.comfyui.utils.comfyui_backend import ComfyError
+
 #: Types that are entered in the canvas rather than wired. Everything else
 #: (MODEL, LATENT, IMAGE, CONDITIONING, VAE, CLIP, custom pack types...) can
 #: only arrive over a link, so it never consumes a positional slot.
@@ -498,6 +500,104 @@ def diff_graphs(before, after):
         "added": added,
         "removed": removed,
         "changed": changed,
+    }
+
+
+#: A widget input whose name ends in this suffix names a model FILE on the
+#: server's disk. Every core loader spells it that way (`ckpt_name`, `lora_name`,
+#: `vae_name`, `clip_name`, `unet_name`, `control_net_name`,
+#: `style_model_name`) and so do the packs that matter (`model_name` in
+#: ImageUpscaleWithModel). Inputs wired over a link or of other names are not
+#: filenames.
+MODEL_INPUT_SUFFIX = "_name"
+
+
+def model_refs(api, object_info):
+    """The widget inputs that name a model FILE, with the node that wants it.
+
+    `validate` checks the graph's SHAPE and `workflow deps` checks the node
+    TYPES; both pass a graph whose CheckpointLoaderSimple names a checkpoint
+    that is not on disk, and that graph queues clean and dies seconds into
+    execution. This reads every string input ending in `_name` that the schema
+    also declares as a widget — the only inputs whose value is a filename on
+    the server.
+    """
+    refs = []
+    for nid, entry in (api or {}).items():
+        schema = dict(schema_inputs(object_info, entry.get("class_type")) or [])
+        for name, val in (entry.get("inputs") or {}).items():
+            if not isinstance(val, str) or not name.endswith(MODEL_INPUT_SUFFIX):
+                continue  # links ([id, slot]) and plain scalars are not filenames
+            spec = schema.get(name)
+            if spec is None or not _is_widget(spec):
+                continue  # undeclared, or a _name input wired over a link
+            refs.append(
+                {
+                    "node": nid,
+                    "class_type": entry.get("class_type"),
+                    "input": name,
+                    "model": val,
+                }
+            )
+    return sorted(refs, key=lambda r: (_node_sort_key(r["node"]), r["input"]))
+
+
+def index_models(client):
+    """filename -> the folders that hold it, from every /models listing.
+
+    A file counts as installed if ANY folder carries it. Guessing which folder
+    a node pack expects (`loras`? `Lora`? `diffusion_models`?) is how a check
+    that should pass reports a miss; the server's own folder listing is the
+    only truth. A folder that refuses to be listed is skipped, not fatal — one
+    unreadable folder must not stop the other folders from being checked.
+    """
+    index = {}
+    folders = client.models()
+    if isinstance(folders, dict):
+        folders = list(folders)
+    for folder in folders or []:
+        try:
+            items = client.models(folder)
+        except ComfyError:
+            continue
+        if isinstance(items, dict):
+            items = list(items)
+        for item in items or []:
+            if isinstance(item, str):
+                index.setdefault(item, []).append(folder)
+    return index
+
+
+def check_models(client, api, object_info):
+    """Which model files the graph names, and whether this server has them.
+
+    With no model refs there is nothing to ask the server, so no /models call
+    is made at all — a graph with no loaders must not turn a folder outage into
+    a failure.
+    """
+    refs = model_refs(api, object_info)
+    if not refs:
+        return {
+            "count": 0,
+            "refs": [],
+            "missing": [],
+            "missing_count": 0,
+            "ok": True,
+            "folders_scanned": 0,
+        }
+    index = index_models(client)
+    checked = []
+    for r in refs:
+        where = index.get(r["model"]) or []
+        checked.append({**r, "installed_in": where})
+    missing = [r for r in checked if not r["installed_in"]]
+    return {
+        "count": len(checked),
+        "refs": checked,
+        "missing": missing,
+        "missing_count": len(missing),
+        "ok": not missing,
+        "folders_scanned": len({f for v in index.values() for f in v}),
     }
 
 

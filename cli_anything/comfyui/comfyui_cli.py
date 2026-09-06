@@ -706,6 +706,44 @@ def workflow_diff(ctx, path_a, path_b, json_):
     emit(ctx, payload, lines)
 
 
+@workflow.command("models")
+@click.argument("path", required=False, type=click.Path())
+@json_option
+@click.pass_context
+def workflow_models(ctx, path, json_):
+    """Whether the model FILES this graph names are on this server.
+
+    With PATH, check that file; without, the session's loaded graph.
+
+    `workflow validate` checks the graph's SHAPE against /object_info and
+    `workflow deps` checks the node TYPES; both pass a graph whose
+    CheckpointLoaderSimple names a checkpoint that is not on disk, and that
+    graph queues clean and dies seconds into execution. This is the third,
+    server-side half: every widget input ending in `_name` — the way loaders
+    spell a filename — is checked against the server's own /models listings,
+    across ALL folders, so a pack that files its models somewhere unexpected
+    still passes. Exits 1 when something is missing.
+    """
+    _merge_json(ctx, json_)
+    api = _graph(ctx, path)
+    try:
+        oi = _object_info(ctx)
+        res = wf.check_models(client(ctx), api, oi)
+    except ComfyError as exc:
+        die(str(exc))
+    payload = {"source": path or "(session)", **res}
+    lines = [
+        f"{res['count']} model file(s) referenced across {res['folders_scanned']} folder(s): "
+        + ("all installed" if res["ok"] else f"{res['missing_count']} MISSING")
+    ]
+    for r in res["refs"]:
+        where = ", ".join(r["installed_in"]) or "NOT INSTALLED"
+        lines.append(f"  node {r['node']} {r['input']}: {r['model']}  [{where}]")
+    emit(ctx, payload, lines)
+    if not res["ok"]:
+        sys.exit(1)
+
+
 def _graph(ctx, path):
     """The graph to act on: an explicit file, else the session's."""
     if path:
@@ -1444,7 +1482,7 @@ def repl(ctx):
         "status": "session + server state",
         "server": "status / features / embeddings / free / interrupt / logs",
         "nodes": "list / search / schema",
-        "workflow": "convert / deps / info / find / set / unset / validate / export / diff",
+        "workflow": "convert / deps / models / info / find / set / unset / validate / export / diff",
         "run": "queue the loaded graph and wait",
         "windows": "run several graphs, freeing VRAM between them",
         "queue": "list / cancel / clear",
