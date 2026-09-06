@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.9.0] — 2026-09-06
+
+- Updated `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (2 files changed, 268 insertions(+))
+
 ## [0.8.0] — 2026-09-06
 
 - Updated `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (2 files changed, 233 insertions(+))

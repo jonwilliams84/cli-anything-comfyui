@@ -2163,3 +2163,246 @@ def test_no_subcommand_enters_the_repl(tmp_path, monkeypatch):
     r = runner.invoke(cl.cli, [])
     assert r.exit_code == 0, r.output
     assert entered == [True]
+
+
+# ------------------------------------- refine round 4: the CLI's untested edges
+#
+# Coverage had 15 statements in comfyui_cli.py that no test had ever executed:
+# nearly all of them the "say WHY it failed" paths and the human-readable
+# branches. A CLI whose error paths are untested reports failures nobody has
+# ever seen — these tests run each one.
+
+
+def test_server_status_dies_loudly_when_the_server_errors(monkeypatch):
+    class Down:
+        def __init__(self, **kw):
+            pass
+
+        def system_stats(self):
+            raise be.ComfyUnavailable("http://127.0.0.1:8188")
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    r = runner.invoke(cl.cli, ["--json", "server", "status"])
+    assert r.exit_code == 1 and "No ComfyUI" in r.output
+
+
+def test_server_embeddings_dies_loudly_when_the_server_errors(monkeypatch):
+    class Down:
+        def __init__(self, **kw):
+            pass
+
+        def embeddings(self):
+            raise be.ComfyError("GET /embeddings -> HTTP 500: exploded")
+
+    monkeypatch.setattr(cl, "ComfyUI", Down)
+    r = runner.invoke(cl.cli, ["--json", "server", "embeddings"])
+    assert r.exit_code == 1 and "HTTP 500" in r.output
+
+
+def test_workflow_convert_reports_drops_warnings_and_writes_the_out_file(monkeypatch, tmp_path):
+    """A muted node is dropped, a dangling link warns, and -o lands on disk."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    canvas = tmp_path / "c.json"
+    canvas.write_text(
+        json.dumps(
+            ui(
+                [
+                    node(
+                        1,
+                        "KSampler",
+                        [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                        inputs=[{"name": "model", "link": 9}],
+                    ),
+                    node(4, "Reroute", mode=2),  # muted: dropped without --keep-muted
+                ],
+                links=[],
+            )
+        ),
+        encoding="utf-8",
+    )
+    out = str(tmp_path / "api.json")
+    human = runner.invoke(
+        cl.cli,
+        ["--session", str(tmp_path / "s.json"), "workflow", "convert", str(canvas), "-o", out],
+    )
+    assert human.exit_code == 0, human.output
+    assert "dropped node 4 (Reroute)" in human.output
+    assert "warning: node 1" in human.output
+    assert f"wrote {os.path.abspath(out)}" in human.output
+    with open(out, encoding="utf-8") as fh:
+        assert json.load(fh)["1"]["class_type"] == "KSampler"
+
+
+def test_workflow_deps_names_a_subgraph_instead_of_a_missing_pack(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    sg = tmp_path / "sg.json"
+    uid = "11111111-2222-3333-4444-555555555555"
+    sg.write_text(
+        json.dumps(
+            {
+                "nodes": [node(1, uid)],
+                "links": [],
+                "definitions": {"subgraphs": [{"id": uid, "name": "my loop"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "deps", str(sg)]).output)
+    assert [s["name"] for s in d["subgraphs"]] == ["my loop"]
+    human = runner.invoke(cl.cli, ["workflow", "deps", str(sg)])
+    assert human.exit_code == 0 and "subgraph (not expanded): my loop" in human.output
+
+
+def test_workflow_info_and_outputs_warn_when_nothing_is_produced(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = tmp_path / "g.json"
+    g.write_text(
+        json.dumps({"1": {"class_type": "KSampler", "inputs": {"seed": 1}}}),
+        encoding="utf-8",
+    )
+    human = runner.invoke(cl.cli, ["workflow", "info", "--path", str(g)])
+    assert human.exit_code == 0, human.output
+    assert "WARNING: no output node" in human.output
+    human = runner.invoke(cl.cli, ["workflow", "outputs", "--path", str(g)])
+    assert human.exit_code == 0, human.output
+    assert "WARNING: no output node" in human.output
+
+
+def test_workflow_set_names_a_missing_node(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "KSampler", "inputs": {"seed": 1}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "set", "9", "seed", "1"])
+    assert r.exit_code == 1 and "no node 9" in r.output
+
+
+def test_workflow_diff_prints_added_and_removed_nodes_in_human_output(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    baseline = tmp_path / "base.json"
+    baseline.write_text(
+        json.dumps(
+            {
+                "1": {"class_type": "KSampler", "inputs": {"seed": 1}},
+                "2": {"class_type": "SaveImage", "inputs": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    session = _seed_session(
+        tmp_path / "s.json",
+        {
+            "1": {"class_type": "KSampler", "inputs": {"seed": 1}},
+            "3": {"class_type": "SaveImage", "inputs": {}},
+        },
+    )
+    human = runner.invoke(cl.cli, ["--session", str(session), "workflow", "diff", str(baseline)])
+    assert human.exit_code == 0, human.output
+    assert "+ node 3" in human.output and "- node 2" in human.output
+
+
+def test_a_ui_format_file_given_to_path_is_converted_first(monkeypatch, tmp_path):
+    """`workflow info --path canvas.json` must handle the UI format, not just API."""
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    canvas = tmp_path / "c.json"
+    canvas.write_text(
+        json.dumps(ui([node(1, "KSampler", [1, "fixed", 20, 8.0, "euler", "normal", 1.0])])),
+        encoding="utf-8",
+    )
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "workflow", "info", "--path", str(canvas)]).output
+    )
+    assert d["nodes"] == 1
+
+
+def test_run_warns_when_the_graph_produced_nothing(tmp_path, monkeypatch):
+    fake = FakeClient(outputs={})
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    human = runner.invoke(cl.cli, ["--session", str(p), "run"])
+    assert human.exit_code == 0, human.output
+    assert "WARNING: nothing was produced" in human.output
+
+
+def test_windows_dies_loudly_when_the_loop_itself_fails(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+
+    def explodes(client, graphs, **kw):
+        raise be.ComfyError("the queue is wedged")
+
+    monkeypatch.setattr(cl.run_core, "run_windows", explodes)
+    g1 = str(_write_api_graph(tmp_path / "w1.json"))
+    g2 = str(_write_api_graph(tmp_path / "w2.json"))
+    r = runner.invoke(cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "windows", g1, g2])
+    assert r.exit_code == 1 and "wedged" in r.output
+
+
+def test_assets_upload_dies_loudly_when_the_server_refuses(monkeypatch, tmp_path):
+    class Refuses:
+        def __init__(self, **kw):
+            pass
+
+        def upload_image(self, path, subfolder="", overwrite=True, kind="input"):
+            raise be.ComfyError("POST /upload/image -> HTTP 500: disk full")
+
+    monkeypatch.setattr(cl, "ComfyUI", Refuses)
+    src = tmp_path / "in.png"
+    src.write_bytes(b"x")
+    r = runner.invoke(cl.cli, ["--json", "assets", "upload", str(src)])
+    assert r.exit_code == 1 and "disk full" in r.output
+
+
+def test_userdata_list_dies_loudly_when_the_server_refuses(monkeypatch):
+    class Refuses:
+        def __init__(self, **kw):
+            pass
+
+        def userdata_list(self, directory="user", recurse=True, full_info=False, in_use=False):
+            raise be.ComfyError("GET /userdata -> HTTP 500: exploded")
+
+    monkeypatch.setattr(cl, "ComfyUI", Refuses)
+    r = runner.invoke(cl.cli, ["--json", "userdata", "list"])
+    assert r.exit_code == 1 and "HTTP 500" in r.output
+
+
+def test_userdata_get_prints_the_bytes_when_there_is_no_out(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(cl.cli, ["userdata", "get", "user/default/workflows/a.json"])
+    assert r.exit_code == 0, r.output
+    assert '{"id": "a"}' in r.output
+
+
+def test_userdata_put_reads_a_real_file(monkeypatch, tmp_path):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    f = tmp_path / "graph.json"
+    payload = b'{"id": "from-file"}'
+    f.write_bytes(payload)
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "userdata", "put", "user/default/workflows/f.json", str(f)]
+        ).output
+    )
+    assert d["path"] == "user/default/workflows/f.json"
+    assert fake.saved["user/default/workflows/f.json"] == payload
+
+
+def test_userdata_copy_dies_loudly_when_the_destination_refuses(monkeypatch):
+    fake = FakeUserdataServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    r = runner.invoke(
+        cl.cli,
+        [
+            "--json",
+            "userdata",
+            "copy",
+            "user/default/workflows/a.json",
+            "user/default/workflows/a.json",
+            "--no-overwrite",
+        ],
+    )
+    assert r.exit_code == 1 and "409" in r.output

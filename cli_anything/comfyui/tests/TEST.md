@@ -369,3 +369,28 @@ run the harness with no subcommand.
 - `comfyui_cli.py` 86% → 95%; total coverage 92% → 97%. 142 unit tests, all
   passing. The live-server E2E suite is unchanged (it needs a real ComfyUI and
   is not part of the CI gate).
+
+## 2026-09-06 — error-path and human-output refinement
+
+The gap found this pass: 15 statements in `comfyui_cli.py` had never been
+executed by any test — almost entirely the `die` paths (what a command says
+when the server errors mid-call) and the human-readable branches of
+otherwise-JSON-tested commands.
+
+- Error paths, each asserted to exit 1 *and* name the cause: `server status`
+  and `server embeddings` on a ComfyError, `assets upload` refused by the
+  server, `userdata list` refused, `userdata copy` blocked by HTTP 409 on the
+  destination, `windows` when the window loop itself raises, `workflow set` on
+  a node that does not exist.
+- Human-output branches: `workflow convert` listing dropped (muted) nodes and
+  dangling-link warnings and the `wrote <out>` line; `workflow deps` naming a
+  subgraph instead of a phantom node pack; `workflow info`/`workflow outputs`
+  warning when the graph has no output node; `workflow diff` printing
+  `+ node`/`- node` lines; `run` warning that nothing was produced.
+- Functional paths never run end to end: a **UI-format** canvas given directly
+  to `workflow info --path` (converted via `_graph` before analysis),
+  `userdata get` printing the bytes to stdout without `--out`, and
+  `userdata put FILE` reading a real file from disk.
+- `comfyui_cli.py` 95% (28 missed statements) → **100%** (0 missed); total
+  coverage 96.7% → 99.3%. 158 unit tests, all passing. The live-server E2E
+  suite is unchanged (it needs a real ComfyUI and is not part of the CI gate).
