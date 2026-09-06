@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [0.12.0] — 2026-09-06
+
+Maintenance release — no new commands, no CLI behaviour change.
+
+- **E2E test fix: `assets upload --overwrite false`** — the v0.11.0 test
+  asserted that a second upload of the same filename raises (a 409-style
+  refusal). ComfyUI has no such response: it renames the new file
+  (`name (1).png`, `name (2).png`, …) — except when the bytes are identical to
+  what is already on disk, in which case it keeps the existing name and writes
+  nothing. The test now pins that real contract against a live server: same
+  bytes keep the original name, different bytes come back as
+  `cli-anything-e2e (1).png`. Found by the post-merge E2E check.
+- Version bumped to 0.12.0 (`cli_anything/comfyui/__init__.py`, `setup.py`).
+
 ## [0.11.0] — 2026-09-06
 
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/core/run.py`, `cli_anything/comfyui/skills/skill.md` and 5 more. (11 files changed, 264 insertions(+), 17 deletions(-))
