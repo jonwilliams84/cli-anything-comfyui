@@ -1235,7 +1235,12 @@ def test_upload_mask_builds_a_multipart_body_with_the_original_ref(monkeypatch, 
     assert req.get_method() == "POST" and req.full_url.endswith("/upload/mask")
     boundary = req.headers["Content-type"].split("boundary=")[1].encode()
     body = req.data
-    assert b'name="original_ref"\r\n\r\nup.png\r\n' in body
+    # JSON, not a bare filename: the server does json.loads(original_ref) and
+    # reads ['filename']. Sending "up.png" made that parse raise and the request
+    # came back HTTP 500 with an empty body — green here, broken against the
+    # real server, until 2026-09-06.
+    assert b'name="original_ref"\r\n\r\n{"filename": "up.png"' in body
+    assert b'"type": "output"' in body
     assert b'name="type"\r\n\r\ntemp\r\n' in body
     assert b'filename="mask.png"' in body and b"\x89PNG fake mask" in body
     assert body.startswith(b"--" + boundary) and body.endswith(b"--" + boundary + b"--\r\n")
@@ -1723,7 +1728,11 @@ def test_userdata_get_returns_the_raw_bytes(monkeypatch):
     blob = be.ComfyUI().userdata_get("user/default/workflows/a.json")
     assert blob == b'{"id": "a"}', "userdata_get must not JSON-decode a canvas"
     assert reqs[0].get_method() == "GET"
-    assert "/userdata/user/default/workflows/a.json" in reqs[0].full_url
+    # The route is /userdata/{file} and aiohttp's {file} does not span "/", so a
+    # literal slash matches NO route and the server answers 405. It must be
+    # percent-encoded into one segment, which is what the frontend does.
+    assert "/userdata/user%2Fdefault%2Fworkflows%2Fa.json" in reqs[0].full_url
+    assert "/userdata/user/default" not in reqs[0].full_url
 
 
 def test_userdata_put_sends_bytes_with_the_overwrite_flag(monkeypatch):
@@ -1738,7 +1747,11 @@ def test_userdata_delete_uses_the_delete_method(monkeypatch):
     reqs = _capture_requests(monkeypatch, payload=b"{}")
     be.ComfyUI().userdata_delete("user/default/workflows/a.json")
     assert reqs[0].get_method() == "DELETE"
-    assert "/userdata/user/default/workflows/a.json" in reqs[0].full_url
+    # The route is /userdata/{file} and aiohttp's {file} does not span "/", so a
+    # literal slash matches NO route and the server answers 405. It must be
+    # percent-encoded into one segment, which is what the frontend does.
+    assert "/userdata/user%2Fdefault%2Fworkflows%2Fa.json" in reqs[0].full_url
+    assert "/userdata/user/default" not in reqs[0].full_url
 
 
 def test_userdata_list_reports_the_server_tree(monkeypatch):

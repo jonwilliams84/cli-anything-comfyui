@@ -268,9 +268,15 @@ class ComfyUI:
         """Multipart upload of an inpainting MASK (POST /upload/mask).
 
         Not the same call as `upload_image`: the server needs `original_ref` —
-        the name of the image the mask belongs to — so it can line the mask up
-        with the original instead of filing it as a loose picture. Without it
-        an inpaint graph silently masks nothing.
+        WHICH IMAGE this mask belongs to — so it can line the mask up with the
+        original instead of filing it as a loose picture. Without it an inpaint
+        graph silently masks nothing.
+
+        `original_ref` is a JSON OBJECT on the wire, `{"filename", "type",
+        "subfolder"}`, because the server parses it with `json.loads` and then
+        reads `['filename']`. A bare filename raises inside that parse and comes
+        back as HTTP 500 with an empty body. Pass either a filename or the dict;
+        this sends the object.
         """
         path = os.path.abspath(os.path.expanduser(path))
         if not os.path.isfile(path):
@@ -279,6 +285,14 @@ class ComfyUI:
         ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         boundary = f"----comfycli{uuid.uuid4().hex}"
         parts = []
+        # `original_ref` goes on the wire as JSON. The server does
+        # `json.loads(post.get("original_ref"))` and then reads `['filename']`,
+        # so a bare filename makes json.loads raise and the request comes back
+        # HTTP 500 with no useful body. Accept either shape from the caller and
+        # always send the object.
+        if isinstance(original_ref, str):
+            original_ref = {"filename": original_ref, "type": "output", "subfolder": ""}
+        original_ref = json.dumps(original_ref)
         for key, val in (("original_ref", original_ref), ("type", kind)):
             if val:
                 parts.append(
@@ -329,8 +343,17 @@ class ComfyUI:
     # ------------------------------------------------------------ user data
 
     def _userdata_path(self, path):
-        """Encode one userdata path, keeping slashes so the tree stays a tree."""
-        return urllib.parse.quote(path.strip("/"), safe="/")
+        """Encode one userdata path into a SINGLE route segment.
+
+        The route is `/userdata/{file}`, and aiohttp's `{file}` matcher does not
+        span `/`. A literal slash therefore matches no route and the server
+        answers 405 Method Not Allowed — not 404, which is why it reads like the
+        verb is wrong rather than the path. `safe=""` percent-encodes the
+        separator, which is how ComfyUI's own frontend addresses
+        `workflows/foo.json`. The tree is expressed by ENCODING the slash, not
+        by preserving it.
+        """
+        return urllib.parse.quote(path.strip("/"), safe="")
 
     def userdata_list(self, directory="user", recurse=True, full_info=False, in_use=False):
         """List the server's user data tree (GET /userdata).

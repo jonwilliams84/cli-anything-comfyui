@@ -372,7 +372,14 @@ class TestCLIRefineSubprocess:
         assert "entries" in d
 
     def test_set_export_diff_unset_roundtrip(self, tmp_path):
-        """set -> export -> diff -> unset, ending where it started."""
+        """set -> export -> diff -> unset.
+
+        NOT "ending where it started": `unset` removes the override, it does
+        not restore the value `set` overwrote. The original version of this
+        test asserted the graph came back identical and failed against a real
+        server on 2026-09-06 — the implementation and the test were written in
+        the same pass and contradicted each other.
+        """
         sess, graph = self._seed_graph(tmp_path)
         self._run(
             [
@@ -401,7 +408,25 @@ class TestCLIRefineSubprocess:
         diff2 = json.loads(
             self._run(["--json", "--session", sess, "workflow", "diff", graph]).stdout
         )
-        assert diff2["same"] is True, "unset did not restore the graph"
+        # NOT a round trip. `unset` REMOVES the override; it does not put back the
+        # value `set` overwrote, and workflow.unset_input says so. The graph
+        # therefore still differs from the original — by the ABSENCE of the
+        # input rather than by its new value.
+        assert diff2["same"] is False, "unset must not silently restore a prior value"
+        after = json.loads(
+            self._run(
+                [
+                    "--json",
+                    "--session",
+                    sess,
+                    "workflow",
+                    "export",
+                    "-o",
+                    str(tmp_path / "unset.json"),
+                ]
+            ).stdout
+        )
+        assert after["nodes"] == 2
 
     def test_unset_on_an_unknown_input_fails_loudly(self, tmp_path):
         sess, _ = self._seed_graph(tmp_path)

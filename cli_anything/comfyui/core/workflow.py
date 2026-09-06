@@ -425,10 +425,18 @@ def set_input(api, node_id, name, value):
 def unset_input(api, node_id, name):
     """Remove one input override, so the node's default or link applies again.
 
-    `workflow set` can only add or overwrite; undoing a patch with another
-    `set` bakes the wrong guess in as a value. Removing the input is the honest
-    inverse — the graph goes back to whatever the schema default or the wire
-    says it should be.
+    `workflow set` can only add or overwrite; undoing a patch with another `set`
+    bakes the wrong guess in as a value. Removing the input lets the node's own
+    default or its wire apply again.
+
+    IT IS NOT A TRUE INVERSE, and must not be described as one. If `set`
+    OVERWROTE an existing value, `unset` does not put the old value back — it
+    removes the key, and the graph no longer matches what it was before the
+    `set`. Restoring would mean remembering prior values in the session, and
+    "restore" is ambiguous anyway when the input was originally a LINK rather
+    than a value. A test asserting set->unset round-trips to an identical graph
+    is asserting a guarantee this function does not make; one shipped on
+    2026-09-06 and failed against a real server for exactly that reason.
     """
     nid = str(node_id)
     if nid not in api:
