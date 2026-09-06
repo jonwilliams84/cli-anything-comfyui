@@ -12,8 +12,8 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — ~60 unit tests, synthetic graphs and a fake client, no server
-- `test_full_e2e.py` — ~20 tests against the real server, including subprocess
+- `test_core.py` — ~92 unit tests, synthetic graphs and a fake client, no server
+- `test_full_e2e.py` — ~25 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
 
@@ -42,6 +42,10 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 - `outputs` finds output nodes; empty means the graph writes nothing
 - `set_input` on a missing node raises with the ids that DO exist
 - `find_nodes` by class_type and by title
+- `unset_input` removes an override and errors on a missing node OR input,
+  naming what exists
+- `diff_graphs` reports added/removed nodes and per-input changes (a rewire is
+  just an input whose `[id, slot]` value changed); identical graphs are `same`
 
 ### `core/session.py`
 
@@ -66,6 +70,9 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
   `node_errors`
 - `wait` times out with a message that says so, and reports the live queue
   position through `on_tick`
+- `upload_mask` builds the multipart body with `original_ref` (a mask without
+  it masks nothing) and refuses a missing file
+- `logs` builds `/internal/logs` with and without a limit
 
 ### `core/run.py` (fake client, no server)
 
@@ -89,6 +96,15 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
   and exits non-zero when a window failed
 - `server features` / `server embeddings` reach the server; with no server they
   name the problem
+- `workflow export -o` writes the PATCHED session graph to disk; without a
+  workflow loaded it says so and exits 1
+- `workflow diff FILE` compares the file (baseline) against the patched session
+  graph; two paths diff file A against file B; with nothing to compare, or no
+  loaded graph, it says so
+- `workflow unset` removes the override from the session and errors name what
+  exists
+- `assets mask` uploads with the original ref recorded
+- `server logs` reports the recent log lines
 
 ## E2E plan (`test_full_e2e.py`) — real server required
 
@@ -104,6 +120,9 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 7. `server free` returns cleanly
 8. Upload a generated PNG and get the server's stored name back
 9. Download a produced file and verify bytes on disk
+10. `/internal/logs` answers (newer builds)
+11. Render, fetch the PNG, upload it back as a MASK for itself — the inpainting
+    path is exercised against the real endpoint
 
 ### Subprocess tests (the installed command)
 
@@ -116,6 +135,9 @@ must work from anywhere:
 - `--json workflow convert <real canvas>` then `workflow info` finds the output node
 - `--json traps` lists the recorded failure modes
 - full workflow: convert -> set an input -> validate -> run -> outputs exist
+- round trip: set -> export -> diff -> unset, ending identical to the source
+- `server logs` parses
+- `workflow unset` on an unknown input fails loudly, naming what exists
 
 ## Realistic workflow scenarios
 

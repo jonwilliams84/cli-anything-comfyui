@@ -947,6 +947,7 @@ class FakeServer:
         self.cancelled = []
         self.cleared = 0
         self.uploads = []
+        self.mask_uploads = []
 
     def object_info(self):
         return OI
@@ -986,6 +987,18 @@ class FakeServer:
     def upload_image(self, path, subfolder="", overwrite=True, kind="input"):
         self.uploads.append((path, subfolder))
         return {"name": os.path.basename(path), "subfolder": subfolder}
+
+    def upload_mask(self, path, original_ref, kind="temp"):
+        self.mask_uploads.append((path, original_ref, kind))
+        return {"name": os.path.basename(path)}
+
+    def logs(self, limit=None):
+        return {
+            "entries": [
+                {"m": "got prompt", "t": 1},
+                {"m": "model loaded", "t": 2},
+            ][: limit or None]
+        }
 
     def download(self, filename, dest, subfolder="", kind="output"):
         os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
@@ -1134,3 +1147,192 @@ def test_server_free_and_interrupt(monkeypatch):
     assert fake.free_calls[-1] == {"unload_models": False, "free_memory": True}
     d = json.loads(runner.invoke(cl.cli, ["--json", "server", "interrupt"]).output)
     assert d["interrupted"] is True
+
+
+# ------------------------------------------------ refine round 2: iterate & repro
+
+
+def test_unset_input_removes_the_override():
+    g = {"1": {"class_type": "KSampler", "inputs": {"seed": 42, "steps": 4}}}
+    wf.unset_input(g, "1", "seed")
+    assert "seed" not in g["1"]["inputs"]
+    assert g["1"]["inputs"]["steps"] == 4
+
+
+def test_unset_input_errors_on_missing_node_or_input():
+    g = {"1": {"class_type": "KSampler", "inputs": {}}}
+    with pytest.raises(wf.WorkflowError, match="no node 2"):
+        wf.unset_input(g, "2", "seed")
+    with pytest.raises(wf.WorkflowError, match="no input 'seed'"):
+        wf.unset_input(g, "1", "seed")
+
+
+def test_diff_graphs_reports_added_removed_and_changed_inputs():
+    before = {
+        "1": {"class_type": "KSampler", "inputs": {"seed": 1, "steps": 4}},
+        "2": {"class_type": "SaveImage", "inputs": {}},
+    }
+    after = {
+        "1": {"class_type": "KSampler", "inputs": {"seed": 2}},  # steps gone, seed changed
+        "3": {"class_type": "SaveImage", "inputs": {}},
+    }
+    d = wf.diff_graphs(before, after)
+    assert d["same"] is False
+    assert d["added"] == ["3"] and d["removed"] == ["2"]
+    changes = {(c["input"], c["from"], c["to"]) for c in d["changed"][0]["changes"]}
+    assert changes == {("seed", 1, 2), ("steps", 4, "(absent)")}
+
+
+def test_diff_graphs_sees_a_rewire_and_identical_graphs():
+    before = {
+        "1": {"class_type": "A", "inputs": {"x": ["2", 0]}},
+        "2": {"class_type": "B", "inputs": {}},
+    }
+    after = {
+        "1": {"class_type": "A", "inputs": {"x": ["3", 0]}},
+        "2": {"class_type": "B", "inputs": {}},
+    }
+    d = wf.diff_graphs(before, after)
+    assert d["changed"][0]["changes"] == [{"input": "x", "from": ["2", 0], "to": ["3", 0]}]
+    assert wf.diff_graphs(before, dict(before))["same"] is True
+    assert wf.diff_graphs({}, {})["same"] is True
+
+
+def test_upload_mask_builds_a_multipart_body_with_the_original_ref(monkeypatch, tmp_path):
+    reqs = _capture_requests(monkeypatch, payload=b'{"name":"mask.png"}')
+    f = tmp_path / "mask.png"
+    f.write_bytes(b"\x89PNG fake mask")
+    c = be.ComfyUI()
+    res = c.upload_mask(str(f), "up.png", kind="temp")
+    assert res["name"] == "mask.png"
+    req = reqs[0]
+    assert req.get_method() == "POST" and req.full_url.endswith("/upload/mask")
+    boundary = req.headers["Content-type"].split("boundary=")[1].encode()
+    body = req.data
+    assert b'name="original_ref"\r\n\r\nup.png\r\n' in body
+    assert b'name="type"\r\n\r\ntemp\r\n' in body
+    assert b'filename="mask.png"' in body and b"\x89PNG fake mask" in body
+    assert body.startswith(b"--" + boundary) and body.endswith(b"--" + boundary + b"--\r\n")
+
+
+def test_upload_mask_refuses_a_missing_file(tmp_path):
+    with pytest.raises(be.ComfyError, match="no such file"):
+        be.ComfyUI().upload_mask(str(tmp_path / "nope.png"), "up.png")
+
+
+def test_logs_hits_internal_logs_and_honours_a_limit(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'{"entries":[{"m":"hi"}]}')
+    c = be.ComfyUI()
+    assert c.logs(limit=50) == {"entries": [{"m": "hi"}]}
+    assert reqs[0].full_url == "http://127.0.0.1:8188/internal/logs?limit=50"
+    c.logs()
+    assert reqs[1].full_url == "http://127.0.0.1:8188/internal/logs"
+
+
+def test_workflow_export_writes_the_patched_session_graph(tmp_path):
+    p = _seed_session(
+        tmp_path / "s.json",
+        {"1": {"class_type": "KSampler", "inputs": {"seed": 42}}},
+    )
+    out = str(tmp_path / "patched.json")
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "export", "-o", out])
+    assert r.exit_code == 0, r.output
+    with open(out, encoding="utf-8") as fh:
+        assert json.load(fh) == {"1": {"class_type": "KSampler", "inputs": {"seed": 42}}}
+
+
+def test_workflow_export_without_a_workflow_says_so(tmp_path):
+    r = runner.invoke(
+        cl.cli,
+        ["--json", "--session", str(tmp_path / "s.json"), "workflow", "export", "-o", "x.json"],
+    )
+    assert r.exit_code == 1 and "no workflow loaded" in r.output
+
+
+def test_workflow_diff_compares_the_session_graph_against_a_file(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(_write_api_graph(tmp_path / "g.json", prefix="old"))
+    session = _seed_session(tmp_path / "s.json", json.load(open(g, encoding="utf-8")))
+    # patch the session, then diff it against the file
+    runner.invoke(
+        cl.cli,
+        ["--json", "--session", str(session), "workflow", "set", "2", "filename_prefix", "new"],
+    )
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "--session", str(session), "workflow", "diff", g]).output
+    )
+    assert d["same"] is False and d["baseline"] == g
+    assert d["changed"][0]["changes"] == [{"input": "filename_prefix", "from": "old", "to": "new"}]
+
+
+def test_workflow_diff_reports_identical_graphs_and_two_files(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(_write_api_graph(tmp_path / "g.json"))
+    session = _seed_session(tmp_path / "s.json", json.load(open(g, encoding="utf-8")))
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "--session", str(session), "workflow", "diff", g]).output
+    )
+    assert d["same"] is True and d["changed"] == []
+    g2 = str(_write_api_graph(tmp_path / "g2.json", prefix="other"))
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "diff", g, g2]).output)
+    assert d["baseline"] == g and d["changed"][0]["changes"] == [
+        {"input": "filename_prefix", "from": "cli", "to": "other"}
+    ]
+
+
+def test_workflow_diff_with_nothing_to_compare_says_so(tmp_path):
+    r = runner.invoke(cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "workflow", "diff"])
+    assert r.exit_code == 1 and "give a file" in r.output
+
+
+def test_workflow_diff_needs_a_loaded_graph_for_the_one_path_form(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(_write_api_graph(tmp_path / "g.json"))
+    r = runner.invoke(
+        cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "workflow", "diff", g]
+    )
+    assert r.exit_code == 1 and "no workflow loaded" in r.output
+
+
+def test_workflow_unset_removes_the_override_from_the_session(tmp_path):
+    p = _seed_session(
+        tmp_path / "s.json", {"1": {"class_type": "KSampler", "inputs": {"seed": 42}}}
+    )
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "unset", "1", "seed"])
+    assert r.exit_code == 0, r.output
+    assert sess.load(str(p))["workflow"]["1"]["inputs"] == {}
+
+
+def test_workflow_unset_errors_name_what_exists(tmp_path):
+    p = _seed_session(
+        tmp_path / "s.json", {"1": {"class_type": "KSampler", "inputs": {"seed": 42}}}
+    )
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "unset", "9", "seed"])
+    assert r.exit_code == 1 and "no node 9" in r.output
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "unset", "1", "cfg"])
+    assert r.exit_code == 1 and "no input 'cfg'" in r.output
+    r = runner.invoke(
+        cl.cli,
+        ["--json", "--session", str(tmp_path / "empty.json"), "workflow", "unset", "1", "cfg"],
+    )
+    assert r.exit_code == 1 and "no workflow loaded" in r.output
+
+
+def test_assets_mask_uploads_with_the_original_ref(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    f = tmp_path / "mask.png"
+    f.write_bytes(b"\x89PNG fake mask")
+    d = json.loads(runner.invoke(cl.cli, ["--json", "assets", "mask", str(f), "up.png"]).output)
+    assert d["name"] == "mask.png"
+    assert fake.mask_uploads == [(str(f), "up.png", "temp")]
+
+
+def test_server_logs_reports_the_recent_lines(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "logs", "--limit", "1"]).output)
+    assert d["count"] == 1 and d["entries"][0]["m"] == "got prompt"

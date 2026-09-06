@@ -422,6 +422,77 @@ def set_input(api, node_id, name, value):
     return api
 
 
+def unset_input(api, node_id, name):
+    """Remove one input override, so the node's default or link applies again.
+
+    `workflow set` can only add or overwrite; undoing a patch with another
+    `set` bakes the wrong guess in as a value. Removing the input is the honest
+    inverse — the graph goes back to whatever the schema default or the wire
+    says it should be.
+    """
+    nid = str(node_id)
+    if nid not in api:
+        raise WorkflowError(f"no node {nid} in this graph (have: {', '.join(sorted(api)[:12])}…)")
+    inputs = api[nid].get("inputs") or {}
+    if name not in inputs:
+        have = ", ".join(sorted(inputs)) or "(none)"
+        raise WorkflowError(f"node {nid} has no input {name!r} (have: {have})")
+    del inputs[name]
+    return api
+
+
+def _node_sort_key(nid):
+    return int(nid) if str(nid).isdigit() else 10**9
+
+
+def diff_graphs(before, after):
+    """What changed between two API graphs, node by node, input by input.
+
+    The everyday loop is convert -> set -> run. When a render stops coming back
+    right, the question is "what did I change since the one that worked?" —
+    and the answer is a diff, not a memory exercise. Links are just inputs
+    whose value is `[id, slot]`, so a rewire shows up as an ordinary change.
+    """
+    before = before or {}
+    after = after or {}
+    b_nodes, a_nodes = set(before), set(after)
+    added = sorted(a_nodes - b_nodes, key=_node_sort_key)
+    removed = sorted(b_nodes - a_nodes, key=_node_sort_key)
+    changed = []
+    for nid in sorted(b_nodes & a_nodes, key=_node_sort_key):
+        b_entry, a_entry = before[nid], after[nid]
+        changes = []
+        if b_entry.get("class_type") != a_entry.get("class_type"):
+            changes.append(
+                {
+                    "input": "(class_type)",
+                    "from": b_entry.get("class_type"),
+                    "to": a_entry.get("class_type"),
+                }
+            )
+        b_in = b_entry.get("inputs") or {}
+        a_in = a_entry.get("inputs") or {}
+        for name in sorted(set(b_in) | set(a_in)):
+            if b_in.get(name) != a_in.get(name):
+                changes.append(
+                    {
+                        "input": name,
+                        "from": b_in.get(name, "(absent)"),
+                        "to": a_in.get(name, "(absent)"),
+                    }
+                )
+        if changes:
+            changed.append(
+                {"node": nid, "class_type": a_entry.get("class_type"), "changes": changes}
+            )
+    return {
+        "same": not (added or removed or changed),
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+    }
+
+
 def find_nodes(api, class_type=None, title=None):
     """Locate nodes by type or title, so a caller need not know numeric ids."""
     hits = []

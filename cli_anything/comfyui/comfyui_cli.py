@@ -194,6 +194,29 @@ def server_features(ctx, json_):
         die(str(exc))
 
 
+@server.command("logs")
+@click.option("--limit", default=100, show_default=True, type=int)
+@json_option
+@click.pass_context
+def server_logs(ctx, limit, json_):
+    """The server's own recent log lines.
+
+    A rejected prompt says WHAT was refused; the log says what happened around
+    it — the OOM warning, the missing pack, the failed checkpoint load.
+    """
+    _merge_json(ctx, json_)
+    try:
+        res = client(ctx).logs(limit=limit)
+    except ComfyError as exc:
+        die(str(exc))
+    entries = res.get("entries") or [] if isinstance(res, dict) else list(res or [])
+    lines = [f"{len(entries)} log line(s)"]
+    for e in entries[-limit:]:
+        msg = e.get("m") if isinstance(e, dict) else e
+        lines.append(f"  {msg}")
+    emit(ctx, {"count": len(entries), "entries": entries[-limit:]}, lines)
+
+
 @server.command("embeddings")
 @json_option
 @click.pass_context
@@ -580,6 +603,103 @@ def workflow_validate(ctx, path, json_):
         sys.exit(1)
 
 
+@workflow.command("unset")
+@click.argument("node_id")
+@click.argument("name")
+@json_option
+@click.pass_context
+def workflow_unset(ctx, node_id, name, json_):
+    """Remove one input override from the loaded graph. Auto-saves unless --dry-run.
+
+    The inverse of `workflow set`: the node falls back to its schema default or
+    its link, rather than to whatever wrong guess overwrote it.
+    """
+    _merge_json(ctx, json_)
+    st = _state(ctx)
+    api = st.get("workflow")
+    if not api:
+        die("no workflow loaded. Run: workflow convert <canvas.json>")
+    try:
+        wf.unset_input(api, node_id, name)
+    except wf.WorkflowError as exc:
+        die(str(exc))
+    saved = _autosave(ctx, st)
+    emit(
+        ctx,
+        {"node": str(node_id), "input": name, "session": saved},
+        f"node {node_id}.{name} removed"
+        + ("  (dry run — not saved)" if saved.get("dry_run") else ""),
+    )
+
+
+@workflow.command("export")
+@click.option("-o", "--out", required=True, type=click.Path(), help="Write the API graph here.")
+@json_option
+@click.pass_context
+def workflow_export(ctx, out, json_):
+    """Write the CURRENT session graph (patches included) to a file.
+
+    `workflow convert -o` writes the freshly converted canvas; this writes what
+    the graph has BECOME — every `workflow set` applied — so a patched graph can
+    be handed to someone else, or diffed against its source.
+    """
+    _merge_json(ctx, json_)
+    api = _state(ctx).get("workflow")
+    if not api:
+        die("no workflow loaded. Run: workflow convert <canvas.json>")
+    out = os.path.abspath(os.path.expanduser(out))
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        _json.dump(api, fh, indent=2, sort_keys=True)
+    emit(ctx, {"out": out, "nodes": len(api)}, f"wrote {len(api)} nodes to {out}")
+
+
+@workflow.command("diff")
+@click.argument("path_a", required=False, type=click.Path())
+@click.argument("path_b", required=False, type=click.Path())
+@json_option
+@click.pass_context
+def workflow_diff(ctx, path_a, path_b, json_):
+    """What changed between two graphs: `diff OTHER.json` or `diff A.json B.json`.
+
+    With one path, the file is the BASELINE and the loaded session graph is the
+    current state — "what did I change since the render that worked". With two,
+    A is the baseline and B the current.
+    """
+    _merge_json(ctx, json_)
+    if not path_a and not path_b:
+        die("give a file to compare against the session graph, or two files.")
+    if path_b:
+        before = _graph(ctx, path_a)
+        after = _graph(ctx, path_b)
+        before_label, after_label = path_a, path_b
+    else:
+        after = _state(ctx).get("workflow")
+        if not after:
+            die("no workflow loaded. Run: workflow convert <canvas.json>")
+        before = _graph(ctx, path_a)
+        before_label, after_label = path_a, "(session)"
+    d = wf.diff_graphs(before, after)
+    payload = {"baseline": before_label, **d}
+    lines = [
+        f"{before_label} -> {after_label}: "
+        + (
+            "identical"
+            if d["same"]
+            else f"{len(d['added'])} added, "
+            f"{len(d['removed'])} removed, {len(d['changed'])} changed"
+        )
+    ]
+    for nid in d["added"]:
+        lines.append(f"  + node {nid}")
+    for nid in d["removed"]:
+        lines.append(f"  - node {nid}")
+    for c in d["changed"]:
+        for ch in c["changes"]:
+            lines.append(f"  ~ node {c['node']} {ch['input']}: {ch['from']!r} -> {ch['to']!r}")
+    emit(ctx, payload, lines)
+
+
 def _graph(ctx, path):
     """The graph to act on: an explicit file, else the session's."""
     if path:
@@ -837,6 +957,31 @@ def assets_upload(ctx, path, subfolder, json_):
     )
 
 
+@assets.command("mask")
+@click.argument("path", type=click.Path(exists=True))
+@click.argument("original_ref")
+@click.option("--kind", default="temp", type=click.Choice(["temp", "output"]), show_default=True)
+@json_option
+@click.pass_context
+def assets_mask(ctx, path, original_ref, kind, json_):
+    """Upload an inpainting MASK for an image already on the server.
+
+    ORIGINAL_REF is the filename the mask lines up with, exactly as the
+    LoadImage node names it. Without it the server files the mask as a loose
+    picture and the inpaint graph masks nothing.
+    """
+    _merge_json(ctx, json_)
+    try:
+        res = client(ctx).upload_mask(path, original_ref, kind=kind)
+    except ComfyError as exc:
+        die(str(exc))
+    emit(
+        ctx,
+        res,
+        f"mask uploaded for {original_ref}" + (f" as {res.get('name')}" if res.get("name") else ""),
+    )
+
+
 @assets.command("download")
 @click.argument("filename")
 @click.argument("dest", type=click.Path())
@@ -957,14 +1102,14 @@ def repl(ctx):
     pt = skin.create_prompt_session()
     commands = {
         "status": "session + server state",
-        "server": "status / features / embeddings / free / interrupt",
+        "server": "status / features / embeddings / free / interrupt / logs",
         "nodes": "list / search / schema",
-        "workflow": "convert / deps / info / find / set / validate",
+        "workflow": "convert / deps / info / find / set / unset / validate / export / diff",
         "run": "queue the loaded graph and wait",
         "windows": "run several graphs, freeing VRAM between them",
         "queue": "list / cancel / clear",
         "history": "list / outputs",
-        "assets": "upload / download",
+        "assets": "upload / mask / download",
         "models": "installed models",
         "traps": "recorded failure modes",
         "help": "this list",
