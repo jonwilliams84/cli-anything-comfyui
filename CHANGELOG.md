@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.10.0] — 2026-09-06
+
+- Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/core/run.py`, `cli_anything/comfyui/skills/skill.md`, `cli_anything/comfyui/tests/test.md` and 1 more. (8 files changed, 156 insertions(+), 2 deletions(-))
+
 ## [0.9.0] — 2026-09-06
 
 - Updated `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (2 files changed, 268 insertions(+))
@@ -35,6 +39,16 @@ All notable changes to this project are documented here.
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/tests/test.md`, `cli_anything/comfyui/tests/test_core.py`. (7 files changed, 556 insertions(+), 8 deletions(-))
 
 ## [Unreleased]
+
+Fifth refine pass — the wait half of the render loop, standalone:
+
+- **`queue wait PROMPT_ID [--timeout S] [--poll S] [--download DIR]`** — await a
+  prompt that is ALREADY on the queue (queued from the canvas, another agent or
+  an earlier shell) and report its outputs from every bucket. `run` only waits
+  for prompts it submitted itself; this closes that gap with new core function
+  `run_core.wait_and_collect`, composed with `fetch` for `--download`.
+- `__main__.py` — the last dark statement in the repo — now covered.
+- Unit suite expanded from 158 to 163 tests.
 
 Third refine pass — the patch loop and the two missing server surfaces:
 

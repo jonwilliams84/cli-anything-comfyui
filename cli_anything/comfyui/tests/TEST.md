@@ -394,3 +394,24 @@ otherwise-JSON-tested commands.
 - `comfyui_cli.py` 95% (28 missed statements) → **100%** (0 missed); total
   coverage 96.7% → 99.3%. 158 unit tests, all passing. The live-server E2E
   suite is unchanged (it needs a real ComfyUI and is not part of the CI gate).
+
+## 2026-09-06 — queue-wait refinement
+
+The gap found this pass: `wait()` in the backend was only reachable through
+`run`, which submits. A prompt queued from the canvas, another agent or an
+earlier shell could be seen (`queue list`) and cancelled (`queue cancel`) but
+never awaited or collected from the shell — the caller had to poll `/history`
+by hand, which is exactly what the harness exists to stop.
+
+- **`queue wait PROMPT_ID [--timeout S] [--poll S] [--download DIR]`** — waits
+  for an ALREADY-QUEUED prompt and reports its outputs from every bucket. New
+  core function `run_core.wait_and_collect` (the wait half of
+  `submit_and_wait`, no submission), composed with `run_core.fetch` for
+  `--download`, verified per file like everywhere else.
+- **`__main__.py`**, the one statement no test had ever executed, now runs via
+  `runpy` with `--help` and is asserted to reach the same CLI.
+- 5 new unit tests: the core function flattening a prompt it did not submit,
+  the command against a fake client (asserting nothing was submitted), the
+  download path, the timeout exit 1, and the module entry point. 163 unit
+  tests, all passing. The live-server E2E suite is unchanged (it needs a real
+  ComfyUI and is not part of the CI gate).

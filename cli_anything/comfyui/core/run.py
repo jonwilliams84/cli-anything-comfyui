@@ -36,6 +36,27 @@ def submit_and_wait(client, api_graph, timeout=1800, poll=1.0, on_tick=None, fro
     }
 
 
+def wait_and_collect(client, prompt_id, timeout=1800, poll=1.0, on_tick=None):
+    """Wait for a prompt that is ALREADY on the queue, then collect its outputs.
+
+    `submit_and_wait` covers the path where this harness queued the graph. This
+    covers the other one: the prompt was queued from the canvas, another agent
+    or an earlier shell, and `queue list` showed its id. Same wait, same
+    every-bucket flattening, no submission.
+    """
+    done = client.wait(prompt_id, timeout=timeout, poll=poll, on_tick=on_tick)
+    entry = done.get("history") or {}
+    files = outputs_of(entry)
+    return {
+        "prompt_id": prompt_id,
+        "completed": done.get("completed"),
+        "status": done.get("status"),
+        "waited_s": done.get("waited_s"),
+        "outputs": files,
+        "output_count": len(files),
+    }
+
+
 def fetch(client, files, dest_dir):
     """Download produced files and VERIFY each one landed.
 

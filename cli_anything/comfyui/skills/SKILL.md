@@ -25,7 +25,7 @@ Desktop app, or `python main.py --listen 0.0.0.0 --port 8188`) or set
 - `workflow` — `convert`, `deps`, `info`, `find`, `set`, `unset`, `validate`,
   `export`, `diff`
 - `run` — queue the loaded graph, wait, report outputs
-- `queue` — `list`, `cancel <prompt_id>`, `clear`
+- `queue` — `list`, `wait <prompt_id> [--download DIR]`, `cancel <prompt_id>`, `clear`
 - `history` — `list`, `outputs [prompt_id]`
 - `assets` — `upload <file>`, `mask <file> <original_ref>`, `download <filename> <dest>`
 - `models` — model folders and their contents
@@ -71,6 +71,11 @@ windowed render that never frees VRAM fills the card and dies partway.
 and the reason. Read it rather than retrying blind.
 
 **`--dry-run`** suppresses the session save for any mutation.
+
+**`run` only waits for prompts it submitted itself.** A prompt queued from the
+canvas, another agent or an earlier shell is awaited with
+`queue wait PROMPT_ID --download DIR` — same wait, outputs read from every
+bucket. `queue list` names the ids.
 
 **`workflow diff FILE`** answers "what did I change since the render that
 worked" — the file is the baseline, the patched session graph is the current

@@ -10,6 +10,8 @@ from __future__ import annotations
 import io
 import json
 import os
+import runpy
+import sys
 import threading
 import urllib.error
 
@@ -2406,3 +2408,65 @@ def test_userdata_copy_dies_loudly_when_the_destination_refuses(monkeypatch):
         ],
     )
     assert r.exit_code == 1 and "409" in r.output
+
+
+# ------------------------------------------------------------------ refine: queue wait
+
+
+def test_wait_and_collect_flattens_outputs_of_a_prompt_it_did_not_submit():
+    res = run_core.wait_and_collect(FakeClient(outputs=OUT_ENTRY), "canvas-pid")
+    assert res["prompt_id"] == "canvas-pid"
+    assert res["output_count"] == 1
+    assert res["outputs"][0]["bucket"] == "images"
+    assert res["status"] == "success"
+    assert res["completed"] is True
+
+
+def test_queue_wait_reports_a_prompt_queued_elsewhere(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    assert fake.submitted == [], "queue wait must not submit anything"
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "queue", "wait", "canvas-pid"]
+        ).output
+    )
+    assert d["prompt_id"] == "canvas-pid"
+    assert d["output_count"] == 1
+    assert d["completed"] is True
+
+
+def test_queue_wait_downloads_every_bucket(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    dest = tmp_path / "out"
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "queue", "wait", "canvas-pid", "--download", str(dest)],
+        ).output
+    )
+    assert d["download"]["downloaded"] == 1
+    assert (dest / "a.png").read_bytes() != b""
+
+
+def test_queue_wait_times_out_with_a_nonzero_exit(monkeypatch):
+    class Stuck:
+        def __init__(self, **kw):
+            pass
+
+        def wait(self, prompt_id, timeout=1800, poll=1.0, on_tick=None):
+            raise be.ComfyError(f"prompt {prompt_id} still not finished after {timeout}s.")
+
+    monkeypatch.setattr(cl, "ComfyUI", Stuck)
+    r = runner.invoke(cl.cli, ["--json", "queue", "wait", "slow-pid"])
+    assert r.exit_code == 1 and "still not finished" in r.output
+
+
+def test_the_module_entry_point_reaches_main(monkeypatch, capsys):
+    """`python -m cli_anything.comfyui` runs the same CLI."""
+    monkeypatch.setattr(sys, "argv", ["cli-anything-comfyui", "--help"])
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_module("cli_anything.comfyui", run_name="__main__")
+    assert exc.value.code == 0
+    assert "Drive a running ComfyUI" in capsys.readouterr().out

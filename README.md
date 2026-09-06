@@ -37,6 +37,7 @@ cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
+cli-anything-comfyui queue wait canvas-pid --download ./out   # await a prompt queued elsewhere
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between
 cli-anything-comfyui userdata list user/default/workflows      # the server's saved-workflow tree
 cli-anything-comfyui userdata put user/default/workflows/r.json r.json  # push a graph into it
