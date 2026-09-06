@@ -254,3 +254,27 @@ lint clean, format clean, bandit clean.
 New since the 0.1.0 build: unit coverage of `core/run.py` (96%), the backend's
 HTTP transport (79%), and the CLI command layer (52%); the `windows`,
 `server features` and `server embeddings` commands.
+
+## Refine pass — 2026-09-06
+
+Same gate, after the refine pass:
+
+```
+75 passed, coverage 85.52% total
+```
+
+- `comfyui_cli.py` 52% → 77%: every command group's handlers are now exercised
+  — `queue list/cancel/clear`, `history list/outputs` (including the session
+  fallback and the unknown-prompt error), `assets upload/download`, `models`
+  (folders and one folder), `nodes list/search/schema`, `server free
+  (--keep-models)/interrupt`, `workflow validate/info/deps`.
+- `comfyui_backend.py` 79% → 97%: the hand-built multipart body in
+  `upload_image` (fields, filename, boundary, the skipped empty-subfolder
+  field), `submit`'s `front`/`extra_data`, the exact verb/path/body of
+  `free`/`clear_queue`/`cancel`/`interrupt`, and the query paths built by
+  `history`/`models`/`object_info(node_class)`.
+- `core/run.py` 96% → 100%: a failed `free()` between windows is reported as a
+  warning on the window result instead of killing the run.
+- Two new commands, unit-tested: `nodes categories` (discovery half of
+  `nodes list --category`) and `workflow outputs` (the file-writing nodes of
+  the loaded graph or a `--path`, composes with `run --download`).

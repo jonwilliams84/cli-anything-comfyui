@@ -840,3 +840,297 @@ def test_server_features_with_no_server_names_the_problem(monkeypatch):
     monkeypatch.setattr(cl, "ComfyUI", Down)
     r = runner.invoke(cl.cli, ["--json", "server", "features"])
     assert r.exit_code == 1 and "No ComfyUI" in r.output
+
+
+# ----------------------------------------------------------------- refine: backend
+
+
+def _capture_requests(monkeypatch, payload=b"{}"):
+    """Fake urlopen, keeping every Request so bodies and headers are checkable."""
+    reqs = []
+
+    def fake(req, timeout=None):
+        reqs.append(req)
+        return io.BytesIO(payload)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    return reqs
+
+
+def test_submit_sends_front_and_extra_data(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'{"prompt_id":"p","number":1}')
+    c = be.ComfyUI()
+    c.submit({"1": {"class_type": "X", "inputs": {}}}, front=True, extra_data={"note": "hi"})
+    body = json.loads(reqs[0].data)
+    assert body["front"] is True
+    assert body["extra_data"] == {"note": "hi"}
+    assert body["client_id"] == c.client_id
+
+
+def test_the_mutating_endpoints_hit_their_verbs_paths_and_bodies(monkeypatch):
+    reqs = _capture_requests(monkeypatch)
+    c = be.ComfyUI()
+    c.free(unload_models=False)
+    c.clear_queue()
+    c.cancel("abc")
+    c.interrupt()
+    assert [(r.get_method(), r.full_url) for r in reqs] == [
+        ("POST", "http://127.0.0.1:8188/free"),
+        ("POST", "http://127.0.0.1:8188/queue"),
+        ("POST", "http://127.0.0.1:8188/queue"),
+        ("POST", "http://127.0.0.1:8188/interrupt"),
+    ]
+    assert json.loads(reqs[0].data) == {"unload_models": False, "free_memory": True}
+    assert json.loads(reqs[1].data) == {"clear": True}
+    assert json.loads(reqs[2].data) == {"delete": ["abc"]}
+
+
+def test_history_models_and_object_info_build_their_query_paths(monkeypatch):
+    reqs = _capture_requests(monkeypatch)
+    c = be.ComfyUI()
+    c.history("pid-9")
+    c.history(max_items=5)
+    c.models("checkpoints")
+    c.models()
+    c.object_info("KSampler")
+    assert [r.full_url for r in reqs] == [
+        "http://127.0.0.1:8188/history/pid-9",
+        "http://127.0.0.1:8188/history?max_items=5",
+        "http://127.0.0.1:8188/models/checkpoints",
+        "http://127.0.0.1:8188/models",
+        "http://127.0.0.1:8188/object_info/KSampler",
+    ]
+
+
+def test_upload_image_builds_a_multipart_body(monkeypatch, tmp_path):
+    reqs = _capture_requests(monkeypatch, payload=b'{"name":"up.png","subfolder":""}')
+    f = tmp_path / "up.png"
+    f.write_bytes(b"\x89PNG fake")
+    c = be.ComfyUI()
+    res = c.upload_image(str(f), subfolder="shots")
+    assert res["name"] == "up.png"
+    req = reqs[0]
+    assert req.get_method() == "POST" and req.full_url.endswith("/upload/image")
+    boundary = req.headers["Content-type"].split("boundary=")[1].encode()
+    body = req.data
+    assert b'name="subfolder"\r\n\r\nshots\r\n' in body
+    assert b'name="overwrite"\r\n\r\ntrue\r\n' in body
+    assert b'filename="up.png"' in body and b"\x89PNG fake" in body
+    assert body.startswith(b"--" + boundary) and body.endswith(b"--" + boundary + b"--\r\n")
+    # With no subfolder the field is skipped entirely, not sent empty.
+    c.upload_image(str(f))
+    assert b'name="subfolder"' not in reqs[1].data
+
+
+# ------------------------------------------------------------------ refine: run.py
+
+
+def test_run_windows_reports_a_failed_free_instead_of_dying():
+    class FreeBlowsUp(FakeClient):
+        def free(self, **kw):
+            self.freed += 1
+            raise be.ComfyError("free exploded")
+
+    res = run_core.run_windows(FreeBlowsUp(outputs=OUT_ENTRY), [{}, {}])
+    assert res["succeeded"] == 2 and res["failed"] == 0
+    assert "free exploded" in res["results"][0]["warnings"][0]
+
+
+# ------------------------------------------------- refine: the rest of the CLI
+
+
+class FakeServer:
+    """A ComfyUI answering every CLI read/write from memory."""
+
+    def __init__(self):
+        self.free_calls = []
+        self.cancelled = []
+        self.cleared = 0
+        self.uploads = []
+
+    def object_info(self):
+        return OI
+
+    def queue(self):
+        return {
+            "queue_running": [[1, "run-1"]],
+            "queue_pending": [[2, "wait-1"], [3, "wait-2"]],
+        }
+
+    def cancel(self, pid):
+        self.cancelled.append(pid)
+        return {"cancelled": pid}
+
+    def clear_queue(self):
+        self.cleared += 1
+        return {"cleared": True}
+
+    def history(self, prompt_id=None, max_items=None):
+        if prompt_id:
+            return {"pid-9": OUT_ENTRY} if prompt_id == "pid-9" else {}
+        return {
+            "pid-9": OUT_ENTRY,
+            "pid-8": {"outputs": {}, "status": {"status_str": "success"}},
+        }
+
+    def models(self, folder=None):
+        return ["a.safetensors", "b.safetensors"] if folder else ["checkpoints", "loras", "vae"]
+
+    def free(self, **kw):
+        self.free_calls.append(kw)
+        return {"unload_models": kw.get("unload_models", True), "free_memory": True}
+
+    def interrupt(self):
+        return {"interrupted": True}
+
+    def upload_image(self, path, subfolder="", overwrite=True, kind="input"):
+        self.uploads.append((path, subfolder))
+        return {"name": os.path.basename(path), "subfolder": subfolder}
+
+    def download(self, filename, dest, subfolder="", kind="output"):
+        os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(b"\x89PNG")
+        return {"path": dest, "bytes": 4}
+
+
+def test_queue_list_cancel_and_clear(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "queue", "list"]).output)
+    assert d["running_count"] == 1 and d["pending_count"] == 2
+    assert d["pending"][1]["position"] == 2
+    human = runner.invoke(cl.cli, ["queue", "list"])
+    assert human.exit_code == 0 and "run-1" in human.output
+    d = json.loads(runner.invoke(cl.cli, ["--json", "queue", "cancel", "wait-1"]).output)
+    assert d["cancelled"] == "wait-1" and fake.cancelled == ["wait-1"]
+    d = json.loads(runner.invoke(cl.cli, ["--json", "queue", "clear"]).output)
+    assert d["cleared"] is True and fake.cleared == 1
+
+
+def test_history_list_and_outputs_with_download(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "history", "list"]).output)
+    assert d["count"] == 2 and d["prompts"][0]["outputs"] == 1
+    dest = tmp_path / "out"
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "history", "outputs", "pid-9", "--download", str(dest)]
+        ).output
+    )
+    assert d["output_count"] == 1 and d["download"]["downloaded"] == 1
+    assert (dest / "a.png").read_bytes()[:4] == b"\x89PNG"
+
+
+def test_history_outputs_falls_back_to_the_session_and_reports_unknowns(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = str(tmp_path / "s.json")
+    st = sess.new(path=p)
+    st["workflow"] = {"1": {"class_type": "SaveImage", "inputs": {}}}
+    st["last_prompt_id"] = "pid-9"
+    sess.save(st)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "--session", p, "history", "outputs"]).output)
+    assert d["prompt_id"] == "pid-9"
+    r = runner.invoke(
+        cl.cli, ["--json", "--session", str(tmp_path / "none.json"), "history", "outputs"]
+    )
+    assert r.exit_code == 1 and "history list" in r.output
+    r = runner.invoke(cl.cli, ["--json", "history", "outputs", "nope"])
+    assert r.exit_code == 1 and "no history for prompt nope" in r.output
+
+
+def test_assets_upload_and_download(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    src = tmp_path / "in.png"
+    src.write_bytes(b"x")
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "assets", "upload", str(src), "--subfolder", "s"]).output
+    )
+    assert d["name"] == "in.png" and fake.uploads == [(str(src), "s")]
+    dest = tmp_path / "o.png"
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "assets", "download", "a.png", str(dest)]).output
+    )
+    assert d["bytes"] == 4 and dest.read_bytes() == b"\x89PNG"
+
+
+def test_models_lists_folders_and_one_folder(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "models"]).output)
+    assert d["count"] == 3 and d["folder"] is None
+    d = json.loads(runner.invoke(cl.cli, ["--json", "models", "checkpoints"]).output)
+    assert d["folder"] == "checkpoints" and d["count"] == 2
+
+
+def test_nodes_list_search_schema_and_categories(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "nodes", "list"]).output)
+    assert d["count"] == len(OI)
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "nodes", "list", "--category", "sampling"]).output
+    )
+    assert d["count"] == 1
+    d = json.loads(runner.invoke(cl.cli, ["--json", "nodes", "search", "sampler"]).output)
+    assert any(h["name"] == "KSampler" for h in d["matches"])
+    d = json.loads(runner.invoke(cl.cli, ["--json", "nodes", "categories"]).output)
+    cats = {c["category"]: c["nodes"] for c in d["categories"]}
+    assert cats == {"sampling": 1, "(none)": len(OI) - 1}
+    d = json.loads(runner.invoke(cl.cli, ["--json", "nodes", "schema", "KSampler"]).output)
+    seed = next(r for r in d["inputs"] if r["name"] == "seed")
+    assert seed["widget"] is True and seed["control_after_generate"] is True
+    model = next(r for r in d["inputs"] if r["name"] == "model")
+    assert model["widget"] is False
+    r = runner.invoke(cl.cli, ["--json", "nodes", "schema", "Nope"])
+    assert r.exit_code == 1 and "nodes search Nope" in r.output
+
+
+def test_workflow_validate_info_and_outputs_over_a_fake_object_info(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(_write_api_graph(tmp_path / "g.json"))
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "validate", "--path", g]).output)
+    assert d["ok"] is False and "EmptyImage" in json.dumps(d["problems"])
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "info", "--path", g]).output)
+    assert d["nodes"] == 2 and len(d["output_nodes"]) == 1
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "outputs", "--path", g]).output)
+    assert d["output_count"] == 1 and d["outputs"][0]["class_type"] == "SaveImage"
+
+
+def test_workflow_outputs_without_a_workflow_says_so(tmp_path):
+    r = runner.invoke(
+        cl.cli, ["--json", "--session", str(tmp_path / "s.json"), "workflow", "outputs"]
+    )
+    assert r.exit_code == 1 and "no workflow loaded" in r.output
+
+
+def test_workflow_deps_names_what_is_missing(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    missing = tmp_path / "missing.json"
+    missing.write_text(json.dumps(ui([node(1, "FoobarNode", widgets=[1])])), encoding="utf-8")
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "deps", str(missing)]).output)
+    assert d["satisfied"] is False and "FoobarNode" in d["missing_node_types"]
+    have = tmp_path / "have.json"
+    have.write_text(
+        json.dumps(ui([node(1, "KSampler", widgets=[7, "fixed", 4, 1.0, "euler", "simple", 1.0])])),
+        encoding="utf-8",
+    )
+    d = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "deps", str(have)]).output)
+    assert d["satisfied"] is True and d["subgraphs"] == []
+
+
+def test_server_free_and_interrupt(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "free"]).output)
+    assert d["unload_models"] is True
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "free", "--keep-models"]).output)
+    assert d["unload_models"] is False
+    assert fake.free_calls[-1] == {"unload_models": False, "free_memory": True}
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "interrupt"]).output)
+    assert d["interrupted"] is True
