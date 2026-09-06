@@ -14,7 +14,13 @@ import click
 from cli_anything.comfyui.core import run as run_core
 from cli_anything.comfyui.core import session as session_core
 from cli_anything.comfyui.core import workflow as wf
-from cli_anything.comfyui.utils.comfyui_backend import ComfyError, ComfyUI, DEFAULT_URL, outputs_of
+from cli_anything.comfyui.utils.comfyui_backend import (
+    ComfyError,
+    ComfyUI,
+    DEFAULT_URL,
+    graph_of,
+    outputs_of,
+)
 
 __version__ = "0.1.0"
 _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -984,7 +990,7 @@ def history_show(ctx, prompt_id, graph_out, json_):
         elif data is not None:
             row["detail"] = data
         messages.append(row)
-    ran = entry.get("prompt")
+    ran = graph_of(entry)  # positional row: the graph is index 2
     files = outputs_of(entry)
     payload = {
         "prompt_id": pid,

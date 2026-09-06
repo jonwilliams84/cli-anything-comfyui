@@ -2883,3 +2883,42 @@ def test_userdata_put_sends_raw_bytes_untouched(monkeypatch):
     reqs = _capture_requests(monkeypatch, payload=b"{}")
     be.ComfyUI().userdata_put("user/default/workflows/a.bin", b"\x00\x01raw")
     assert reqs[0].data == b"\x00\x01raw", "bytes go to the wire exactly as given"
+
+
+def test_graph_of_reads_the_positional_history_row():
+    """`entry["prompt"]` is [number, prompt_id, graph, extra, outputs_to_execute].
+
+    Treating the field itself as the graph gets a 5-element list, fails an
+    isinstance(dict) check, and reports "this entry carries no graph" about an
+    entry that plainly has one. Shipped 2026-09-06 and caught against the real
+    server, where a finished render's entry["prompt"][2] held the two nodes it
+    had just run.
+    """
+    graph = {
+        "1": {"class_type": "EmptyImage", "inputs": {}},
+        "2": {"class_type": "SaveImage", "inputs": {}},
+    }
+    entry = {"prompt": [3, "abc-123", graph, {"client_id": "x"}, ["2"]]}
+    assert be.graph_of(entry) == graph
+
+
+def test_graph_of_accepts_a_bare_dict_too():
+    """Nothing promises the row shape forever."""
+    graph = {"1": {"class_type": "EmptyImage", "inputs": {}}}
+    assert be.graph_of({"prompt": graph}) == graph
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [
+        {},
+        {"prompt": None},
+        {"prompt": []},
+        {"prompt": [1, "id"]},
+        {"prompt": [1, "id", "not a dict", {}, []]},
+        {"prompt": {}},
+        None,
+    ],
+)
+def test_graph_of_returns_none_when_there_really_is_no_graph(entry):
+    assert be.graph_of(entry) is None

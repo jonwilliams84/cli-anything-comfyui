@@ -474,6 +474,30 @@ def _position(queue, prompt_id):
     return None
 
 
+def graph_of(history_entry):
+    """The API graph a finished prompt actually ran, or None.
+
+    `entry["prompt"]` is a POSITIONAL row, exactly like the queue rows `_qid()`
+    reads:
+
+        [number, prompt_id, graph, extra_data, outputs_to_execute]
+
+    so the graph is index 2, not the field itself. Treating `entry["prompt"]` as
+    the graph gets a 5-element list, fails an `isinstance(..., dict)` check, and
+    reports "this entry carries no graph" about an entry that plainly has one —
+    which is what shipped on 2026-09-06.
+
+    A dict is accepted too: nothing in the API promises the row shape forever,
+    and a future server that returns the graph directly should just work.
+    """
+    p = (history_entry or {}).get("prompt")
+    if isinstance(p, dict):
+        return p or None
+    if isinstance(p, (list, tuple)) and len(p) > 2 and isinstance(p[2], dict):
+        return p[2] or None
+    return None
+
+
 def outputs_of(history_entry):
     """Flatten a history entry into a list of produced files.
 
