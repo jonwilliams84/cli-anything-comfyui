@@ -943,6 +943,7 @@ class FakeServer:
     """A ComfyUI answering every CLI read/write from memory."""
 
     def __init__(self):
+        self.url = "http://127.0.0.1:8188"
         self.free_calls = []
         self.cancelled = []
         self.cleared = 0
@@ -951,6 +952,31 @@ class FakeServer:
 
     def object_info(self):
         return OI
+
+    def system_stats(self):
+        return {
+            "system": {
+                "comfyui_version": "0.34.5",
+                "os": "nt",
+                "python_version": "3.12.14 (main)",
+                "ram_free": 8 * 2**30,
+                "argv": ["main.py", "--listen"],
+            },
+            "devices": [
+                {
+                    "name": "RTX 3090",
+                    "type": "cuda",
+                    "vram_total": 24 * 2**30,
+                    "vram_free": 6 * 2**30,
+                }
+            ],
+        }
+
+    def features(self):
+        return {"supports_preview_metadata": True}
+
+    def embeddings(self):
+        return ["clip_vision"]
 
     def queue(self):
         return {
@@ -1336,3 +1362,309 @@ def test_server_logs_reports_the_recent_lines(monkeypatch):
     monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
     d = json.loads(runner.invoke(cl.cli, ["--json", "server", "logs", "--limit", "1"]).output)
     assert d["count"] == 1 and d["entries"][0]["m"] == "got prompt"
+
+
+# ------------------------------------- refine round 3: the converter's edge paths
+
+
+def test_load_names_the_missing_file(tmp_path):
+    with pytest.raises(wf.WorkflowError, match="no such workflow"):
+        wf.load(str(tmp_path / "absent.json"))
+
+
+def test_dict_style_link_rows_are_understood_too():
+    """Newer canvas builds serialise `links` as objects, not positional rows.
+
+    Reading only the list shape converts every such workflow with every input
+    silently unwired — the graph then fails validation with a wall of
+    "required input is missing" that looks like a schema problem.
+    """
+    g = {
+        "nodes": [
+            node(4, "CheckpointLoaderSimple", ["a.safetensors"]),
+            node(
+                1,
+                "KSampler",
+                [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                inputs=[{"name": "model", "link": 7}],
+            ),
+        ],
+        "links": [
+            {
+                "id": 7,
+                "origin_id": 4,
+                "origin_slot": 0,
+                "target_id": 1,
+                "target_slot": 0,
+                "type": "MODEL",
+            }
+        ],
+    }
+    assert wf.link_map(g) == {7: ("4", 0)}, "the dict row was not read"
+    api, _ = wf.to_api(g, OI, strict=False)
+    assert api["1"]["inputs"]["model"] == ["4", 0]
+
+
+def test_a_link_whose_origin_node_does_not_exist_is_dropped_and_warned():
+    """Link row present, origin node absent — the canvas of a half-deleted graph."""
+    g = ui(
+        [
+            node(
+                1,
+                "KSampler",
+                [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                inputs=[{"name": "model", "link": 7}],
+            )
+        ],
+        links=[[7, 77, 0, 1, 0, "MODEL"]],
+    )
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert "model" not in api["1"]["inputs"]
+    assert any("resolves only to" in w["why"] for w in rep["warnings"])
+
+
+def test_an_input_with_a_link_id_the_map_never_heard_of_is_warned_about():
+    g = ui(
+        [
+            node(
+                1,
+                "KSampler",
+                [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                inputs=[{"name": "model", "link": 9}],
+            )
+        ],
+        links=[[7, 4, 0, 1, 0, "MODEL"]],
+    )
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert "model" not in api["1"]["inputs"]
+    assert any("link 9 has no origin" in w["why"] for w in rep["warnings"])
+
+
+def test_an_input_with_no_link_at_all_is_skipped_quietly():
+    """A placeholder input (link: null) is canvas scaffolding, not an error."""
+    g = ui(
+        [
+            node(
+                1,
+                "KSampler",
+                [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                inputs=[{"name": "model", "link": None}],
+            )
+        ]
+    )
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert "model" not in api["1"]["inputs"]
+    assert rep["warnings"] == [], "a null link is not worth a warning"
+
+
+def test_a_bypassed_node_with_no_source_warns_instead_of_silently_rewiring():
+    """Bypassed node with NO wired input: pass-through has nothing to pass."""
+    g = ui(
+        [
+            node(9, "VAEDecode", mode=4),
+            node(
+                1,
+                "KSampler",
+                [1, "fixed", 20, 8.0, "euler", "normal", 1.0],
+                inputs=[{"name": "model", "link": 2}],
+            ),
+        ],
+        links=[[2, 9, 0, 1, 0, "MODEL"]],
+    )
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert "model" not in api["1"]["inputs"]
+    assert any("resolves only to" in w["why"] for w in rep["warnings"])
+
+
+def test_widgets_serialised_by_name_skip_the_positional_pass():
+    """Some packs write `widgets_values` as {name: value} — nothing positional."""
+    g = ui([node(1, "KSampler")])
+    g["nodes"][0]["widgets_values"] = {"seed": 5, "steps": 3}
+    api, _ = wf.to_api(g, OI, strict=False)
+    assert api["1"]["inputs"]["seed"] == 5
+    assert api["1"]["inputs"]["steps"] == 3
+
+
+def test_extra_widget_values_are_ignored_but_reported():
+    """A frontend-only widget (or pack drift) leaves values the schema never
+    declared. Every NAMED input must still land, and the surplus is surfaced."""
+    g = ui([node(1, "KSampler", [71177, "randomize", 4, 1.0, "euler", "simple", 1.0, "EXTRA"])])
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert api["1"]["inputs"]["denoise"] == 1.0
+    extra = [w for w in rep["warnings"] if "extra_values" in w]
+    assert extra and extra[0]["extra_values"] == 1
+    assert "frontend-only widget" in extra[0]["why"]
+
+
+def test_a_node_title_travels_into_meta():
+    """`workflow find --title` only works if conversion kept the title."""
+    g = ui([node(1, "KSampler", [1, "fixed", 20, 8.0, "euler", "normal", 1.0], title="hero")])
+    api, _ = wf.to_api(g, OI, strict=False)
+    assert api["1"]["_meta"]["title"] == "hero"
+    assert wf.find_nodes(api, title="hero")[0]["node"] == "1"
+
+
+def test_find_nodes_sorts_digit_ids_numerically_and_survives_non_digit_ids():
+    api = {
+        "10": {"class_type": "SaveImage", "inputs": {}},
+        "2": {"class_type": "KSampler", "inputs": {}},
+        "aux": {"class_type": "SaveImage", "inputs": {}},
+    }
+    hits = wf.find_nodes(api, class_type="SaveImage")
+    assert [h["node"] for h in hits] == ["aux", "10"], (
+        "10 and 2 must not sort as strings ('10' < '2'), and 'aux' anchors at 0"
+    )
+
+
+def test_validate_names_an_entry_with_no_class_type():
+    res = wf.validate({"1": {"inputs": {}}}, OI)
+    assert not res["ok"]
+    assert res["problems"] == [{"node": "1", "problem": "no class_type"}]
+
+
+def test_diff_graphs_reports_a_class_type_change():
+    d = wf.diff_graphs(
+        {"1": {"class_type": "KSampler", "inputs": {}}},
+        {"1": {"class_type": "KSamplerAdvanced", "inputs": {}}},
+    )
+    assert d["changed"][0]["changes"] == [
+        {"input": "(class_type)", "from": "KSampler", "to": "KSamplerAdvanced"}
+    ]
+
+
+# ------------------------------------- refine round 3: backend and session edges
+
+
+def test_an_http_error_with_a_non_json_body_still_surfaces_the_text(monkeypatch):
+    """A proxy's HTML 502 page is the most common 'why is nothing answering'."""
+    exc = urllib.error.HTTPError(
+        "http://x/models", 502, "Bad Gateway", {}, io.BytesIO(b"<html>gateway exploded</html>")
+    )
+    _patch_urlopen(monkeypatch, lambda req: (_ for _ in ()).throw(exc))
+    with pytest.raises(be.ComfyError, match="HTTP 502.*gateway exploded"):
+        be.ComfyUI().models()
+
+
+def test_an_empty_reply_is_an_empty_mapping_not_a_crash(monkeypatch):
+    _patch_urlopen(monkeypatch, lambda req: io.BytesIO(b""))
+    assert be.ComfyUI().models() == {}
+
+
+def test_features_and_embeddings_hit_their_endpoints(monkeypatch):
+    reqs = _capture_requests(monkeypatch, payload=b'{"supports_preview_metadata": true}')
+    c = be.ComfyUI()
+    assert c.features() == {"supports_preview_metadata": True}
+    assert reqs[0].full_url == "http://127.0.0.1:8188/features"
+    reqs2 = _capture_requests(monkeypatch, payload=b'["clip_vision"]')
+    assert c.embeddings() == ["clip_vision"]
+    assert reqs2[0].full_url == "http://127.0.0.1:8188/embeddings"
+
+
+def test_wait_polls_and_sleeps_without_an_on_tick(monkeypatch):
+    """The no-progress-callback path still polls, sleeps, and times out cleanly."""
+    c = be.ComfyUI()
+    monkeypatch.setattr(c, "history", lambda pid=None, max_items=None: {})
+    with pytest.raises(be.ComfyError, match="still not finished"):
+        c.wait("pid", timeout=0.2, poll=0)
+
+
+def test_load_honours_an_explicit_url_over_the_stored_one(tmp_path):
+    """`--url` must beat whatever the session file recorded last time."""
+    p = tmp_path / "s.json"
+    st = sess.new(url="http://stored:1", path=str(p))
+    sess.save(st)
+    assert sess.load(str(p), url="http://override:2")["url"] == "http://override:2"
+
+
+# ------------------------------------- refine round 3: the CLI commands themselves
+
+
+def test_server_status_reports_version_os_and_vram(monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = json.loads(runner.invoke(cl.cli, ["--json", "server", "status"]).output)
+    assert d["up"] is True and d["comfyui_version"] == "0.34.5"
+    assert d["devices"][0]["vram_free_gb"] == 6.0
+    assert d["devices"][0]["vram_total_gb"] == 24.0
+    assert d["ram_free_gb"] == 8.0
+    human = runner.invoke(cl.cli, ["server", "status"])
+    assert human.exit_code == 0
+    assert "ComfyUI 0.34.5 on nt" in human.output
+    assert "RTX 3090" in human.output and "6.0/24.0 GB" in human.output
+
+
+def test_a_command_without_json_falls_back_to_the_json_printer(monkeypatch):
+    """`emit`'s third branch: no --json, no human rendering — JSON anyway."""
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: FakeServer())
+    d = json.loads(runner.invoke(cl.cli, ["server", "features"]).output)
+    assert d["supports_preview_metadata"] is True
+
+
+def test_workflow_convert_takes_a_canvas_loads_the_session_and_writes_a_file(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    canvas = tmp_path / "canvas.json"
+    canvas.write_text(
+        json.dumps(
+            ui(
+                [
+                    node(4, "CheckpointLoaderSimple", ["a.safetensors"]),
+                    node(
+                        1,
+                        "KSampler",
+                        [71177, "randomize", 4, 1.0, "euler", "simple", 1.0],
+                        inputs=[{"name": "model", "link": 7}],
+                        title="hero",
+                    ),
+                    node(
+                        2,
+                        "SaveImage",
+                        ["comfy"],
+                        inputs=[{"name": "images", "link": 8}],
+                    ),
+                    node(3, "VAEDecode"),
+                ],
+                links=[[7, 4, 0, 1, 0, "MODEL"], [8, 1, 0, 2, 0, "IMAGE"]],
+            ),
+        ),
+        encoding="utf-8",
+    )
+    out = str(tmp_path / "api.json")
+    session = str(tmp_path / "s.json")
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "--session",
+                session,
+                "workflow",
+                "convert",
+                str(canvas),
+                "-o",
+                out,
+            ],
+        ).output
+    )
+    assert d["nodes"] == 4 and d["dropped"] == [], "every node has a schema here and is kept"
+    assert sess.load(session)["workflow"]["1"]["_meta"]["title"] == "hero"
+    with open(out, encoding="utf-8") as fh:
+        assert json.load(fh)["2"]["class_type"] == "SaveImage"
+
+
+def test_run_reports_a_rejected_graph_on_stderr_with_exit_1(tmp_path, monkeypatch):
+    fake = FakeClient(fail_on={0})
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "run"])
+    assert r.exit_code == 1 and "window exploded" in r.output
+    assert sess.load(str(p))["last_prompt_id"] == "", "a failed run records no prompt id"
+
+
+def test_workflow_validate_exits_1_when_the_graph_is_rejectable(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    g = str(_write_api_graph(tmp_path / "g.json"))
+    r = runner.invoke(cl.cli, ["workflow", "validate", "--path", g])
+    assert r.exit_code == 1, "an invalid graph must fail the shell, not just print"
+    assert "problem(s)" in r.output and "not installed" in r.output
