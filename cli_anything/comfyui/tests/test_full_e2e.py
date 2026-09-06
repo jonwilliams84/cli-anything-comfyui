@@ -465,11 +465,34 @@ def test_history_clear_prunes_the_finished_prompts(client, object_info):
     assert client.history() in ({}, None), "a full clear leaves no entries"
 
 
-def test_upload_image_can_refuse_to_overwrite(client, tmp_path):
-    """--no-overwrite: the second upload of the same name answers HTTP 409."""
+def test_upload_without_overwrite_renames_rather_than_refusing(client, tmp_path):
+    """`overwrite=false` does NOT error — ComfyUI de-duplicates the NAME.
+
+    The server walks `name (1).png`, `name (2).png` until the path is free, and
+    before each step compares the image HASH: identical bytes are treated as a
+    duplicate, so it keeps the existing name and writes nothing at all
+    (server.py, the `compare_image_hash` branch added for issue #3465).
+
+    An earlier version of this test asserted HTTP 409. ComfyUI has no such
+    response, and asserting it made the harness look like it had a behaviour the
+    software does not — caught against the real server on 2026-09-06.
+    """
     f = tmp_path / "cli-anything-e2e.png"
     f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
     first = client.upload_image(str(f), subfolder="cli-anything-e2e")
     assert first.get("name")
-    with pytest.raises(Exception):
-        client.upload_image(str(f), subfolder="cli-anything-e2e", overwrite=False)
+    again = client.upload_image(str(f), subfolder="cli-anything-e2e", overwrite=False)
+    assert again.get("name"), "the second upload must still answer with a name"
+    # Same bytes -> the hash check short-circuits and the original name stands.
+    assert again["name"] == first["name"], (
+        "identical bytes should hit the duplicate check, not create a copy"
+    )
+
+    # Different bytes under the same name DO get renamed rather than refused.
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"1" * 64)
+    third = client.upload_image(str(f), subfolder="cli-anything-e2e", overwrite=False)
+    assert third.get("name") != first["name"], "different bytes must not overwrite"
+    print(
+        f"\n  no-overwrite: {first['name']} -> same for identical bytes, "
+        f"{third['name']} for different"
+    )
