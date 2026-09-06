@@ -730,16 +730,29 @@ def _graph(ctx, path):
 )
 @click.option("--timeout", default=1800, show_default=True, type=int)
 @click.option("--front", is_flag=True, default=False, help="Jump the queue.")
+@click.option(
+    "--extra-data",
+    default=None,
+    help="JSON object sent as the prompt's extra_data (e.g. a filename the "
+    "server embeds in the PNG metadata).",
+)
 @click.option("--download", "dest", default=None, help="Download the outputs into this directory.")
 @json_option
 @click.pass_context
-def run_cmd(ctx, path, timeout, front, dest, json_):
+def run_cmd(ctx, path, timeout, front, dest, extra_data, json_):
     """Queue the graph, wait for it, and report what it produced."""
     _merge_json(ctx, json_)
     api = _graph(ctx, path)
+    if extra_data is not None:
+        try:
+            extra_data = _json.loads(extra_data)
+        except ValueError as exc:
+            die(f"--extra-data must be a JSON object: {exc}")
+        if not isinstance(extra_data, dict):
+            die('--extra-data must be a JSON object, e.g. \'{"filename": "job1"}\'')
     c = client(ctx)
     try:
-        res = run_core.submit_and_wait(c, api, timeout=timeout, front=front)
+        res = run_core.submit_and_wait(c, api, timeout=timeout, front=front, extra_data=extra_data)
     except ComfyError as exc:
         die(str(exc))
     st = _state(ctx)
@@ -929,6 +942,31 @@ def history_list(ctx, limit, json_):
     )
 
 
+@history.command("clear")
+@click.option(
+    "--id", "prompt_id", default=None, help="Delete just this prompt's entry instead of all."
+)
+@json_option
+@click.pass_context
+def history_clear(ctx, prompt_id, json_):
+    """Prune finished prompts from history. Wipes all, or one entry with --id.
+
+    History grows without bound on a busy server, and every `queue wait` poll
+    and `history list` reads all of it. The canvas has a Clear-history button;
+    this is its API counterpart. The outputs themselves stay on disk — only the
+    record goes.
+    """
+    _merge_json(ctx, json_)
+    try:
+        client(ctx).history_delete([prompt_id] if prompt_id else None)
+    except ComfyError as exc:
+        die(str(exc))
+    if prompt_id:
+        emit(ctx, {"deleted": [prompt_id]}, f"deleted history for {prompt_id}")
+    else:
+        emit(ctx, {"cleared": True}, "history cleared")
+
+
 @history.command("outputs")
 @click.argument("prompt_id", required=False)
 @click.option("--download", "dest", default=None, help="Download them into this directory.")
@@ -972,13 +1010,34 @@ def assets():
 @assets.command("upload")
 @click.argument("path", type=click.Path(exists=True))
 @click.option("--subfolder", default="", help="Subfolder inside the input directory.")
+@click.option(
+    "--kind",
+    default="input",
+    type=click.Choice(["input", "temp", "output"]),
+    show_default=True,
+    help="Which server directory the file lands in.",
+)
+@click.option(
+    "--no-overwrite",
+    is_flag=True,
+    default=False,
+    help="Refuse if the name already exists (the server answers HTTP 409).",
+)
 @json_option
 @click.pass_context
-def assets_upload(ctx, path, subfolder, json_):
-    """Put a local file in the server's input directory."""
+def assets_upload(ctx, path, subfolder, kind, no_overwrite, json_):
+    """Put a local file in the server's input directory.
+
+    Uploads default to `--kind input` and overwriting — re-uploading a tweaked
+    file under the same name is the everyday case. `--no-overwrite` makes the
+    server reject a collision instead of silently replacing a file a graph may
+    already reference.
+    """
     _merge_json(ctx, json_)
     try:
-        res = client(ctx).upload_image(path, subfolder=subfolder)
+        res = client(ctx).upload_image(
+            path, subfolder=subfolder, kind=kind, overwrite=not no_overwrite
+        )
     except ComfyError as exc:
         die(str(exc))
     emit(
@@ -1303,7 +1362,7 @@ def repl(ctx):
         "run": "queue the loaded graph and wait",
         "windows": "run several graphs, freeing VRAM between them",
         "queue": "list / cancel / clear",
-        "history": "list / outputs",
+        "history": "list / outputs / clear",
         "assets": "upload / mask / download",
         "userdata": "list / get / put / move / copy / delete",
         "models": "installed models",

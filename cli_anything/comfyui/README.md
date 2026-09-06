@@ -41,6 +41,9 @@ cli-anything-comfyui workflow unset 3 seed      # remove one input override
 cli-anything-comfyui workflow export -o p.json  # write the patched session graph to disk
 cli-anything-comfyui workflow diff my.json      # what changed since that file was converted
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
+cli-anything-comfyui run --extra-data '{"filename": "job1"}'   # metadata with the prompt
+cli-anything-comfyui history clear --id canvas-pid             # prune one finished prompt
+cli-anything-comfyui assets upload f.png --kind temp --no-overwrite
 cli-anything-comfyui windows w1.json w2.json    # a windowed render: VRAM freed between
 cli-anything-comfyui traps                      # the recorded ways this goes wrong
 ```

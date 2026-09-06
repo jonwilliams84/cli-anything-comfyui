@@ -14,6 +14,7 @@ harness is an HTTP client to the REAL ComfyUI, exactly as the browser is:
 
     POST /prompt              queue a graph, returns {prompt_id, number, node_errors}
     GET  /history/{id}        what a finished prompt produced
+    POST /history             clear history, or delete named entries from it
     GET  /queue               running + pending
     POST /queue               clear, or delete by id
     POST /interrupt           stop the current execution
@@ -84,8 +85,11 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest
     queue      list / wait <id> / cancel / clear
-    history    list / get / outputs
-    assets     upload an input, upload an inpainting mask, download an output
+    history    list / outputs / clear (the canvas's Clear-history button, as an
+               API call: POST /history with {"clear": true} or {"delete": [ids]})
+    assets     upload an input (--kind input/temp/output, --no-overwrite makes
+               the server answer 409 instead of silently replacing),
+               upload an inpainting mask, download an output
     userdata   list / get / put / move / copy / delete the server's user tree
                (move is the server's POST /userdata/{path}/move/{to}; copy is a
                GET and a PUT, because the API has no copy route)

@@ -415,3 +415,31 @@ by hand, which is exactly what the harness exists to stop.
   download path, the timeout exit 1, and the module entry point. 163 unit
   tests, all passing. The live-server E2E suite is unchanged (it needs a real
   ComfyUI and is not part of the CI gate).
+
+## 2026-09-06 — history lifecycle, upload fidelity, prompt metadata
+
+The gap found this pass, against the real server surface: the harness could
+read history but never prune it (`POST /history` accepts `{"clear": true}` and
+`{"delete": [ids]}` — the canvas's Clear-history button), `assets upload`
+hid two parameters the backend already supported (`kind`, `overwrite=False`),
+and `run` never exposed the submit path's `extra_data` (how the frontend
+attaches a filename that lands in the PNG metadata).
+
+- **`history clear [--id PROMPT_ID]`** — prune one finished prompt, or wipe
+  all. New backend function `ComfyUI.history_delete` (`{"clear": true}` when no
+  ids, `{"delete": [...]}` otherwise; the server answers plain 200).
+- **`assets upload --kind input|temp|output --no-overwrite`** — the backend's
+  `upload_image(kind=..., overwrite=...)` now reachable from the shell;
+  `--no-overwrite` makes the server answer HTTP 409 instead of silently
+  replacing a file a graph may already reference.
+- **`run --extra-data 'JSON'`** — a JSON object forwarded through
+  `submit_and_wait` to the prompt body's `extra_data`; malformed JSON or a
+  non-object fails loudly before anything is submitted.
+- 7 new unit tests: the backend verb/path/body of `history_delete` and the
+  `type`/`overwrite=false` multipart fields; `submit_and_wait` forwarding
+  `front`/`extra_data` (and sending neither by default); `history clear`
+  wiping, pruning and its no-server error; the upload flags reaching the
+  server; `run --extra-data` forwarding, rejecting non-JSON and non-objects.
+- 2 new live-server E2E tests (not part of the CI gate): history prune-then-
+  wipe against a real render, and an overwrite-refused upload.
+- 170 unit tests, all passing. The live-server E2E suite is unchanged in kind.

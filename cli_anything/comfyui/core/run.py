@@ -15,10 +15,12 @@ import time
 from cli_anything.comfyui.utils.comfyui_backend import outputs_of
 
 
-def submit_and_wait(client, api_graph, timeout=1800, poll=1.0, on_tick=None, front=False):
+def submit_and_wait(
+    client, api_graph, timeout=1800, poll=1.0, on_tick=None, front=False, extra_data=None
+):
     """Queue a graph and block until it finishes. The everyday path."""
     started = time.time()
-    reply = client.submit(api_graph, front=front)
+    reply = client.submit(api_graph, front=front, extra_data=extra_data)
     prompt_id = reply.get("prompt_id")
     if not prompt_id:
         raise RuntimeError(f"server accepted the prompt but returned no prompt_id: {reply}")

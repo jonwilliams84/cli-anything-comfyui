@@ -450,3 +450,26 @@ def test_userdata_round_trip_against_the_live_server(client):
         client.userdata_delete(p)
     with pytest.raises(Exception):
         client.userdata_get(p), "deleted means deleted"
+
+
+def test_history_clear_prunes_the_finished_prompts(client, object_info):
+    """POST /history: run once, prune that id, then wipe — and history empties."""
+    graph = _minimal_graph(object_info)
+    res = run_core.submit_and_wait(client, graph, timeout=300)
+    assert (client.history(res["prompt_id"]) or {}).get(res["prompt_id"])
+    client.history_delete([res["prompt_id"]])
+    assert not (client.history(res["prompt_id"]) or {}).get(res["prompt_id"]), (
+        "the pruned prompt is gone from history"
+    )
+    client.history_delete()
+    assert client.history() in ({}, None), "a full clear leaves no entries"
+
+
+def test_upload_image_can_refuse_to_overwrite(client, tmp_path):
+    """--no-overwrite: the second upload of the same name answers HTTP 409."""
+    f = tmp_path / "cli-anything-e2e.png"
+    f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+    first = client.upload_image(str(f), subfolder="cli-anything-e2e")
+    assert first.get("name")
+    with pytest.raises(Exception):
+        client.upload_image(str(f), subfolder="cli-anything-e2e", overwrite=False)

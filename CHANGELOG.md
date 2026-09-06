@@ -2,6 +2,10 @@
 
 All notable changes to this project are documented here.
 
+## [0.11.0] — 2026-09-06
+
+- Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/core/run.py`, `cli_anything/comfyui/skills/skill.md` and 5 more. (11 files changed, 264 insertions(+), 17 deletions(-))
+
 ## [0.10.0] — 2026-09-06
 
 - Updated `comfyui.md`, `readme.md`, `cli_anything/comfyui/comfyui_cli.py`, `cli_anything/comfyui/core/run.py`, `cli_anything/comfyui/skills/skill.md`, `cli_anything/comfyui/tests/test.md` and 1 more. (8 files changed, 156 insertions(+), 2 deletions(-))

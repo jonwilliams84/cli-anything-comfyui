@@ -178,6 +178,19 @@ class ComfyUI:
         q = f"?max_items={int(max_items)}" if max_items else ""
         return self._request("GET", f"/history{q}")
 
+    def history_delete(self, prompt_ids=None):
+        """Prune finished prompts from history (POST /history).
+
+        History grows without bound on a busy server, and every `wait` poll and
+        `history list` reads all of it. The canvas has a Clear-history button;
+        this is its API counterpart. With no ids the whole history is wiped
+        (`{"clear": true}`); with ids, exactly those entries are dropped
+        (`{"delete": [...]}`). The server answers plain 200 with no body.
+        """
+        body = {"delete": [str(p) for p in prompt_ids]} if prompt_ids else {"clear": True}
+        self._request("POST", "/history", body)
+        return body
+
     def is_up(self):
         try:
             self.system_stats()
