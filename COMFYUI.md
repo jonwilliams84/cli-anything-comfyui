@@ -83,7 +83,7 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
     run        submit a graph and wait, with progress
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest
-    queue      list / cancel / clear
+    queue      list / wait <id> / cancel / clear
     history    list / get / outputs
     assets     upload an input, upload an inpainting mask, download an output
     userdata   list / get / put / move / copy / delete the server's user tree

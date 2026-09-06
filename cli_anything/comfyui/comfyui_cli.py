@@ -853,6 +853,38 @@ def queue_cancel(ctx, prompt_id, json_):
         die(str(exc))
 
 
+@queue.command("wait")
+@click.argument("prompt_id")
+@click.option("--timeout", default=1800, show_default=True, type=int)
+@click.option("--poll", default=1.0, show_default=True, type=float, help="Seconds between polls.")
+@click.option("--download", "dest", default=None, help="Download the outputs into this directory.")
+@json_option
+@click.pass_context
+def queue_wait(ctx, prompt_id, timeout, poll, dest, json_):
+    """Wait for an ALREADY-QUEUED prompt and report its outputs.
+
+    For prompts queued from the canvas, another agent or an earlier shell —
+    anything `run` did not submit itself. Reads every output bucket, not just
+    images. `queue list` names the ids.
+    """
+    _merge_json(ctx, json_)
+    c = client(ctx)
+    try:
+        payload = run_core.wait_and_collect(c, prompt_id, timeout=timeout, poll=poll)
+    except ComfyError as exc:
+        die(str(exc))
+    if dest and payload["outputs"]:
+        payload["download"] = run_core.fetch(c, payload["outputs"], dest)
+    lines = [f"prompt {prompt_id}: {payload['status'] or 'finished'}"] + [
+        f"  [{f['bucket']}] {f['filename']}" for f in payload["outputs"][:20]
+    ]
+    if payload.get("download"):
+        lines.append(
+            f"  downloaded {payload['download']['downloaded']} to {payload['download']['dir']}"
+        )
+    emit(ctx, payload, lines)
+
+
 @queue.command("clear")
 @json_option
 @click.pass_context
