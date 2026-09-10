@@ -26,6 +26,10 @@ Desktop app, or `python main.py --listen 0.0.0.0 --port 8188`) or set
   `export`, `diff`
 - `run` — queue the loaded graph, wait, report outputs; `--extra-data 'JSON'`
   rides along with the prompt (e.g. a filename the server embeds in PNG metadata)
+- `sweep` — run ONE graph many times varying named inputs: `--param
+  NODE.INPUT=v1,v2` (zipped; `--cross` for the product) or `--plan
+  variants.json`; each variant is patched onto a copy, so the session graph is
+  untouched
 - `queue` — `list`, `wait <prompt_id> [--download DIR]`, `cancel <prompt_id>`, `clear`
 - `history` — `list`, `outputs [prompt_id]`, `clear [--id PROMPT_ID]`
 - `assets` — `upload <file> [--kind input|temp|output] [--no-overwrite]`,

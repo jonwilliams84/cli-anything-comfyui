@@ -2,6 +2,45 @@
 
 All notable changes to this project are documented here.
 
+## [0.16.0] — 2026-09-10
+
+The parameter sweep. Varying one input of one graph — a seed, a width, a
+prompt — across N renders is the most-scripted loop over ComfyUI, and until now
+it had no command: the only way was a shell chain of `workflow set` + `run`,
+which mutates the session graph, leaves the last override baked in, and loses
+the mapping between variant and prompt id. `windows` runs different FILES, not
+variations of one graph.
+
+- **`sweep`** — run ONE graph many times, varying named inputs. Each variant is
+  patched onto a deep copy with `wf.set_input`, queued, waited on, and its
+  outputs collected from every bucket; the loaded graph is never modified and
+  the session records only the last finished prompt id. Values are parsed as
+  JSON when they parse (`1.batch_size=2,1` queues integers, not strings), else
+  kept as strings. VRAM is freed between variants; a failed variant does not
+  abort the rest; a patch naming an unknown node or input fails THAT variant
+  before submission, so a typo costs no queue slot. Exits 1 if any variant
+  failed, so `sweep … && next-step` chains stop at the failure.
+  - `--param NODE.INPUT=v1,v2,…` (repeatable) — value lists are ZIPPED; uneven
+    lengths die loudly instead of truncating silently.
+  - `--cross` — the cartesian product of the `--param` value lists.
+  - `--plan variants.json` — explicit variants
+    (`[{"label": "tall", "set": {"1": {"width": 32, "height": 96}}}, …]`) for
+    arbitrary combinations and comma-containing values.
+  - `--download DIR`, `--timeout`, `--keep-vram`, `--path`, `--json` — the same
+    options and conventions as `run` and `windows`.
+- New core function `run_sweep` in `core/run.py`, reusing `submit_and_wait` and
+  the `run_windows` failure/freedom conventions.
+- 21 new unit tests in `test_core.py` (225 total, all passing; coverage 99%):
+  copies-not-originals, keep-going on failure, free between / keep-vram, no
+  queue slot for a bad patch, zip vs cross, JSON coercion, uneven-length
+  refusal, argument errors, plan shapes, exit codes, download, session update.
+- 4 new E2E tests in `test_full_e2e.py`: a real 2-variant sweep verifying both
+  PNGs' magic bytes, and subprocess tests of the CLI with `--param`, `--plan`,
+  and the unknown-node exit-1 path. `--version` pins updated 0.1.0 → 0.16.0.
+- Docs: `sweep` added to the README usage block and a batch-variation section,
+  to the SOP's command groups and a new "why it is not `windows`" section, and
+  to the REPL help.
+
 ## [0.15.0] — 2026-09-06
 
 One new command, closing the third leg of pre-flight before a render.

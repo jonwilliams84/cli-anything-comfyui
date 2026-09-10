@@ -39,6 +39,9 @@ cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph writ
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
 cli-anything-comfyui run --extra-data '{"filename": "job1"}'   # metadata with the prompt
+cli-anything-comfyui sweep --param 3.seed=1,2,3 --download ./out  # one graph, N renders
+cli-anything-comfyui sweep --cross --param 3.seed=1,2 --param 3.cfg=5,9  # 4 renders
+cli-anything-comfyui sweep --plan variants.json                # explicit variants
 cli-anything-comfyui queue wait canvas-pid --download ./out   # await a prompt queued elsewhere
 cli-anything-comfyui history show canvas-pid                   # why a render failed: the server's execution messages
 cli-anything-comfyui history clear --id canvas-pid             # prune one finished prompt
@@ -84,6 +87,14 @@ execution. `workflow models` exits 1 when something is missing.
 gifs, videos, audio — because code that reads only `images` finds nothing for
 every video workflow. A graph with no output node is flagged before it wastes a
 render.
+
+**Batch variation of ONE graph.** `sweep` runs the same graph once per variant
+of a named input — the seed/width/prompt loop that used to mean a shell chain
+of `workflow set` + `run`, mutating the session graph and leaving the last
+override baked in. Each variant is patched onto a copy (`--param
+NODE.INPUT=v1,v2` zipped, `--cross` for the product, `--plan variants.json`
+for arbitrary combinations), VRAM is freed between variants, a failed variant
+does not abort the rest, and a patch naming an unknown node costs no queue slot.
 
 ## Session
 

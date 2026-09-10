@@ -5,6 +5,7 @@ Every command supports `--json`. With no subcommand this enters the REPL.
 
 from __future__ import annotations
 
+import itertools
 import json as _json
 import os
 import sys
@@ -22,7 +23,7 @@ from cli_anything.comfyui.utils.comfyui_backend import (
     outputs_of,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.16.0"
 _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 
@@ -859,6 +860,146 @@ def windows_cmd(ctx, paths, timeout, keep_vram, dest, json_):
         sys.exit(1)
 
 
+@cli.command("sweep")
+@click.option(
+    "--path",
+    "path",
+    default=None,
+    type=click.Path(),
+    help="Sweep this file instead of the session graph.",
+)
+@click.option(
+    "--param",
+    "params",
+    multiple=True,
+    metavar="NODE.INPUT=V1,V2,…",
+    help="An input to vary; one render per value. Repeatable — without --cross "
+    "the value lists are ZIPPED (all must be the same length), with --cross "
+    "they take the cartesian product.",
+)
+@click.option(
+    "--cross",
+    is_flag=True,
+    default=False,
+    help="Take the cartesian product of the --param values instead of zipping them.",
+)
+@click.option(
+    "--plan",
+    "plan_path",
+    default=None,
+    type=click.Path(exists=True),
+    help='A JSON file of explicit variants: [{"label": "c", "set": {"3": {"seed": 1}}}, …].',
+)
+@click.option("--timeout", default=1800, show_default=True, type=int)
+@click.option("--keep-vram", is_flag=True, default=False, help="Do NOT free VRAM between variants.")
+@click.option(
+    "--download", "dest", default=None, help="Download every produced file into this directory."
+)
+@json_option
+@click.pass_context
+def sweep_cmd(ctx, path, params, cross, plan_path, timeout, keep_vram, dest, json_):
+    """Run ONE graph many times, varying named inputs.
+
+    The parameter sweep that until now meant a shell loop of
+    `workflow set` + `run`, mutating the session graph and leaving the last
+    override baked in. Each variant is patched onto a copy; the loaded graph is
+    untouched. A value is parsed as JSON (numbers, booleans), else kept as a
+    string; for values containing a comma, or arbitrary combinations, use
+    --plan.
+
+      cli-anything-comfyui sweep --param 3.seed=1,2,3 --download ./out
+      cli-anything-comfyui sweep --cross --param 3.seed=1,2 --param 3.cfg=5,9
+    """
+    _merge_json(ctx, json_)
+    variants = _build_variants(params, cross, plan_path)
+    api = _graph(ctx, path)
+    c = client(ctx)
+    try:
+        res = run_core.run_sweep(c, api, variants, timeout=timeout, free_between=not keep_vram)
+    except ComfyError as exc:
+        die(str(exc))
+    ok = [r for r in res["results"] if r.get("ok")]
+    if ok:
+        st = _state(ctx)
+        st["last_prompt_id"] = ok[-1]["prompt_id"]
+        _autosave(ctx, st)
+    if dest and res["outputs"]:
+        res["download"] = run_core.fetch(c, res["outputs"], dest)
+    lines = [f"{res['succeeded']}/{res['variants']} variant(s) finished"]
+    for r in res["results"]:
+        if r.get("ok"):
+            lines.append(f"  {r['label']}: {r['output_count']} file(s)")
+        else:
+            lines.append(f"  {r['label']}: FAILED — {r['error']}")
+    if res.get("download"):
+        lines.append(
+            f"  downloaded {res['download']['downloaded']} file(s) to {res['download']['dir']}"
+        )
+    emit(ctx, res, lines)
+    if res["failed"]:
+        sys.exit(1)
+
+
+def _coerce(text):
+    """A sweep value is JSON when it parses, else a string — same rule as `workflow set`."""
+    try:
+        return _json.loads(text)
+    except ValueError:
+        return text
+
+
+def _build_variants(params, cross, plan_path):
+    """Turn --param / --plan / --cross into the list run_sweep consumes."""
+    if plan_path and params:
+        die("give --plan OR --param, not both")
+    if not plan_path and not params:
+        die("nothing to vary. Pass --param NODE.INPUT=v1,v2 or --plan variants.json")
+    if plan_path:
+        try:
+            with open(plan_path, encoding="utf-8") as fh:
+                plan = _json.load(fh)
+        except ValueError as exc:
+            die(f"--plan is not valid JSON: {exc}")
+        if not isinstance(plan, list) or not plan:
+            die("--plan must be a non-empty JSON array of variants")
+        for i, v in enumerate(plan):
+            if not isinstance(v, dict) or not isinstance(v.get("set"), dict) or not v["set"]:
+                die(f"--plan variant {i} must be an object with a non-empty 'set' object")
+        return plan
+    specs = []
+    for p in params:
+        if "=" not in p:
+            die(f"--param must be NODE.INPUT=VALUES — got {p!r}")
+        target, values = p.split("=", 1)
+        if "." not in target:
+            die(f"--param target must be NODE.INPUT — got {target!r}")
+        node_id, name = target.split(".", 1)
+        vals = [v.strip() for v in values.split(",")]
+        if not vals or any(v == "" for v in vals):
+            die(f"--param {target} has an empty value in {values!r}")
+        specs.append((node_id, name, vals))
+    if cross:
+        combos = itertools.product(*[s[2] for s in specs])
+    else:
+        lengths = {len(s[2]) for s in specs}
+        if len(lengths) > 1:
+            die(
+                "--param value lists must be the same length to zip them (got "
+                + ", ".join(str(len(s[2])) for s in specs)
+                + ") — or pass --cross"
+            )
+        combos = zip(*[s[2] for s in specs], strict=True)
+    variants = []
+    for combo in combos:
+        set_: dict = {}
+        labels = []
+        for (node_id, name, _), value in zip(specs, combo, strict=True):
+            set_.setdefault(node_id, {})[name] = _coerce(value)
+            labels.append(f"{node_id}.{name}={value}")
+        variants.append({"label": " ".join(labels), "set": set_})
+    return variants
+
+
 # ----------------------------------------------------------------- queue/history
 
 
@@ -1484,6 +1625,7 @@ def repl(ctx):
         "nodes": "list / search / schema",
         "workflow": "convert / deps / models / info / find / set / unset / validate / export / diff",
         "run": "queue the loaded graph and wait",
+        "sweep": "run ONE graph many times, varying named inputs",
         "windows": "run several graphs, freeing VRAM between them",
         "queue": "list / cancel / clear",
         "history": "list / outputs / clear",

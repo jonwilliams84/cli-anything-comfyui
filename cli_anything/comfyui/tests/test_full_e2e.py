@@ -203,7 +203,7 @@ class TestCLISubprocess:
         assert "ComfyUI" in self._run(["--help"]).stdout
 
     def test_version(self):
-        assert "0.1.0" in self._run(["--version"]).stdout
+        assert "0.16.0" in self._run(["--version"]).stdout
 
     def test_server_status_json(self):
         d = json.loads(self._run(["--json", "server", "status"]).stdout)
@@ -588,3 +588,115 @@ def test_upload_without_overwrite_renames_rather_than_refusing(client, tmp_path)
         f"\n  no-overwrite: {first['name']} -> same for identical bytes, "
         f"{third['name']} for different"
     )
+
+
+# ----------------------------------------------------------------------- sweep
+
+
+def test_a_sweep_varies_an_input_and_every_variant_renders(client, object_info, tmp_path):
+    """The parameter sweep against the real renderer: ONE graph, patched per
+    variant onto a copy, queued once per variant, outputs from every variant.
+
+    The variant copies must not leak into each other: a sweep of widths renders
+    two DIFFERENT images, not the first width twice.
+    """
+    graph = _minimal_graph(object_info)
+    widths = [32, 48]
+    variants = [{"label": f"w{w}", "set": {"1": {"width": w}}} for w in widths]
+    res = run_core.run_sweep(client, graph, variants, timeout=300)
+    assert res["succeeded"] == 2, f"both variants must render: {res['results']}"
+    assert res["failed"] == 0
+    assert len(res["outputs"]) >= 2, "each variant produced at least one file"
+    got = run_core.fetch(client, res["outputs"], str(tmp_path))
+    assert got["empty"] == [], f"zero-byte outputs in the sweep: {got['empty']}"
+    for f in got["files"]:
+        with open(f["path"], "rb") as fh:
+            assert fh.read(8) == b"\x89PNG\r\n\x1a\n", "a sweep output is not a PNG"
+    print(
+        f"\n  sweep: {res['succeeded']}/{res['variants']} rendered, {got['downloaded']} downloaded"
+    )
+
+
+class TestCLISweep:
+    """The sweep command, through the installed CLI, against the real server."""
+
+    CLI_BASE = _resolve_cli("cli-anything-comfyui")
+
+    def _run(self, args, check=True):
+        proc = subprocess.run(
+            self.CLI_BASE + args, capture_output=True, text=True, timeout=600, check=False
+        )
+        if check:
+            assert proc.returncode == 0, f"{args} -> {proc.returncode}\n{proc.stderr[-2000:]}"
+        return proc
+
+    def _seed_graph(self, tmp_path):
+        sess = str(tmp_path / "s.json")
+        graph = str(tmp_path / "g.json")
+        with open(graph, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "1": {
+                        "class_type": "EmptyImage",
+                        "inputs": {"width": 64, "height": 64, "batch_size": 1, "color": 0},
+                    },
+                    "2": {
+                        "class_type": "SaveImage",
+                        "inputs": {"images": ["1", 0], "filename_prefix": "cli_e2e_sweep"},
+                    },
+                },
+                fh,
+            )
+        self._run(["--json", "--session", sess, "workflow", "convert", graph])
+        return sess, graph
+
+    def test_sweep_params_render_each_variant(self, tmp_path):
+        sess, _ = self._seed_graph(tmp_path)
+        dest = tmp_path / "out"
+        d = json.loads(
+            self._run(
+                [
+                    "--json",
+                    "--session",
+                    sess,
+                    "sweep",
+                    "--param",
+                    "1.width=32,48",
+                    "--download",
+                    str(dest),
+                ]
+            ).stdout
+        )
+        assert d["succeeded"] == 2 and d["failed"] == 0
+        assert d["download"]["downloaded"] >= 2 and dest.is_dir()
+        assert d["results"][0]["label"] == "1.width=32"
+
+    def test_sweep_plan_file_variants(self, tmp_path):
+        sess, _ = self._seed_graph(tmp_path)
+        plan = tmp_path / "plan.json"
+        plan.write_text(
+            json.dumps(
+                [
+                    {"label": "tall", "set": {"1": {"width": 32, "height": 96}}},
+                    {"set": {"1": {"width": 48}}},
+                ]
+            ),
+            encoding="utf-8",
+        )
+        d = json.loads(
+            self._run(["--json", "--session", sess, "sweep", "--plan", str(plan)]).stdout
+        )
+        assert d["succeeded"] == 2
+        assert d["results"][0]["label"] == "tall"
+        assert d["results"][1]["label"] == "variant 2/2"
+
+    def test_sweep_with_an_unknown_node_fails_loudly_without_rendering(self, tmp_path):
+        """The typo case: exit 1, the error names the node, and NOTHING is
+        queued — a failed patch must not spend a queue slot."""
+        sess, _ = self._seed_graph(tmp_path)
+        proc = self._run(
+            ["--json", "--session", sess, "sweep", "--param", "99.width=32,48"], check=False
+        )
+        assert proc.returncode == 1
+        d = json.loads(proc.stdout)
+        assert d["failed"] == 2 and "no node 99" in d["results"][0]["error"]

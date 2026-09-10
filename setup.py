@@ -5,7 +5,7 @@ with open("cli_anything/comfyui/README.md") as f:
 
 setup(
     name="cli-anything-comfyui",
-    version="0.15.0",
+    version="0.16.0",
     description="Drive a running ComfyUI from the shell: workflows, nodes, queue, renders, outputs.",
     long_description=long_description,
     long_description_content_type="text/markdown",

@@ -12,8 +12,8 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — 202 unit tests, synthetic graphs and a fake client, no server
-- `test_full_e2e.py` — ~30 tests against the real server, including subprocess
+- `test_core.py` — 225 unit tests, synthetic graphs and a fake client, no server
+- `test_full_e2e.py` — ~35 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
 
@@ -535,3 +535,33 @@ Nothing exposed whether the model FILES exist.
   with zero refs, a REAL checkpoint from the server's `checkpoints` folder comes
   back installed with that folder named, and a fabricated filename exits 1
   naming the missing file.
+
+## 2026-09-10 — v0.16.0: `sweep`
+
+The gap this pass: the parameter sweep. Varying one input (a seed, a width, a
+prompt) across N renders of the SAME graph is the most-scripted loop over
+ComfyUI, and before this it was assembled by hand from `workflow set` + `run` —
+which mutates the session graph and leaves the last override baked in — or by
+duplicating whole files for `windows`, which runs different GRAPHS, not
+variations of one.
+
+- **`sweep`** — run one graph many times, varying named inputs. Values are
+  parsed as JSON when they parse (so `1.batch_size=2,1` queues ints, not
+  strings), else kept as strings. `--param` value lists are ZIPPED by default
+  (uneven lengths die loudly) and `--cross` takes the cartesian product;
+  `--plan variants.json` takes explicit variants for arbitrary combinations or
+  comma-containing strings. VRAM is freed between variants like `windows`; a
+  failed variant does not abort the rest; a patch naming an unknown node or
+  input fails THAT variant only, before submission, so a typo costs no queue
+  slot. Each variant is patched onto a deep copy — the loaded graph is
+  untouched, and the session records only the last finished prompt id.
+- New core function `run_sweep` in `core/run.py`, reusing `submit_and_wait` and
+  the `run_windows` failure/freedom conventions.
+- 21 new unit tests in `test_core.py` (copies-not-originals, keep-going on
+  failure, free between / keep-vram, no queue slot for a bad patch, zip vs
+  cross, JSON coercion, uneven-length refusal, argument errors, plan shapes,
+  exit code on failure, download, session update). 225 total, all passing.
+  Coverage: 99% statements.
+- 4 new E2E tests in `test_full_e2e.py`: a core-level 2-variant sweep that
+  verifies both renders' PNG magic bytes, and subprocess tests of the CLI with
+  `--param`, a `--plan` file, and the unknown-node exit-1 path.
