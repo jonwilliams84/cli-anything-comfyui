@@ -14,6 +14,7 @@ import runpy
 import sys
 import threading
 import urllib.error
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -727,7 +728,7 @@ def _seed_session(path, graph):
 
 
 def test_the_cli_reports_its_version():
-    assert "0.1.0" in runner.invoke(cl.cli, ["--version"]).output
+    assert "0.16.0" in runner.invoke(cl.cli, ["--version"]).output
 
 
 def test_traps_list_and_one_in_full():
@@ -3110,3 +3111,259 @@ def test_workflow_models_dies_loudly_when_the_server_errors(monkeypatch, tmp_pat
     sess_file = _seed_session(tmp_path / "s.json", {"2": {"class_type": "SaveImage", "inputs": {}}})
     r = runner.invoke(cl.cli, ["--json", "--session", str(sess_file), "workflow", "models"])
     assert r.exit_code == 1 and "No ComfyUI" in r.output
+
+
+# ------------------------------------------------------------------ run_sweep
+
+
+def test_run_sweep_patches_copies_and_leaves_the_original_alone():
+    """The whole point over a shell loop of `workflow set` + `run`: the caller's
+    graph (the session's) comes out exactly as it went in."""
+    c = FakeClient(outputs=OUT_ENTRY)
+    api = {"1": {"class_type": "EmptyImage", "inputs": {"width": 64, "height": 64}}}
+    variants = [
+        {"label": "w64", "set": {"1": {"width": 64}}},
+        {"label": "w128", "set": {"1": {"width": 128}}},
+    ]
+    res = run_core.run_sweep(c, api, variants, free_between=False)
+    assert res["succeeded"] == 2 and res["failed"] == 0
+    assert [g["1"]["inputs"]["width"] for g in c.submitted] == [64, 128]
+    assert api["1"]["inputs"]["width"] == 64, "the caller's graph was mutated"
+
+
+def test_run_sweep_reports_a_failed_variant_and_keeps_going():
+    c = FakeClient(outputs=OUT_ENTRY, fail_on={1})
+    res = run_core.run_sweep(c, {}, [{}, {}, {}])
+    assert res["succeeded"] == 2 and res["failed"] == 1
+    assert res["results"][1]["ok"] is False
+    assert "window exploded" in res["results"][1]["error"]
+    assert len(res["outputs"]) == 2, "the two good variants still hand back files"
+    assert c.freed == 2, "VRAM freed between variants even across a failure"
+
+
+def test_run_sweep_can_keep_vram_resident():
+    c = FakeClient(outputs=OUT_ENTRY)
+    res = run_core.run_sweep(c, {}, [{}, {}], free_between=False)
+    assert res["succeeded"] == 2 and c.freed == 0
+
+
+def test_run_sweep_rejects_a_bad_patch_without_spending_a_queue_slot():
+    """An unknown node in variant 2 must fail THAT variant only, before any
+    submission — a 12-variant sweep must not be aborted by a typo, nor waste a
+    render on one."""
+    seen = []
+
+    class Note(FakeClient):
+        def submit(self, graph, front=False, extra_data=None):
+            seen.append(graph)
+            return super().submit(graph, front=front, extra_data=extra_data)
+
+    c = Note(outputs=OUT_ENTRY)
+    res = run_core.run_sweep(
+        c,
+        {"1": {"class_type": "X", "inputs": {}}},
+        [{"set": {"1": {"seed": 1}}}, {"set": {"99": {"seed": 2}}}],
+    )
+    assert res["succeeded"] == 1 and res["failed"] == 1
+    assert "no node 99" in res["results"][1]["error"]
+    assert len(seen) == 1, "the bad variant must never reach the queue"
+
+
+def test_run_sweep_defaults_a_label_and_reports_it():
+    seen = []
+    res = run_core.run_sweep(FakeClient(outputs=OUT_ENTRY), {}, [{}, {}], on_result=seen.append)
+    assert res["results"][0]["label"] == "variant 1/2"
+    assert seen[0]["label"] == "variant 1/2", "on_result gets each variant as it lands"
+
+
+def test_sweep_zips_the_params_into_one_variant_each(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "--session",
+                p,
+                "sweep",
+                "--param",
+                "1.width=64,128",
+                "--param",
+                "1.height=32,48",
+            ],
+        ).output
+    )
+    assert d["succeeded"] == 2 and d["failed"] == 0
+    assert [(g["1"]["inputs"]["width"], g["1"]["inputs"]["height"]) for g in fake.submitted] == [
+        (64, 32),
+        (128, 48),
+    ]
+    assert d["results"][0]["label"] == "1.width=64 1.height=32"
+    st = json.loads(Path(p).read_text())
+    assert st["last_prompt_id"] == "pid-2", "the last finished variant updates the session"
+
+
+def test_sweep_values_are_json_when_they_parse(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--param", "1.batch_size=2,1"])
+    assert [g["1"]["inputs"]["batch_size"] for g in fake.submitted] == [2, 1], (
+        "2 must be an INT, not the string '2'"
+    )
+
+
+def test_sweep_cross_takes_the_product(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "--session",
+                p,
+                "sweep",
+                "--cross",
+                "--param",
+                "1.width=64,128",
+                "--param",
+                "1.height=32,48",
+            ],
+        ).output
+    )
+    assert d["variants"] == 4
+    assert [(g["1"]["inputs"]["width"], g["1"]["inputs"]["height"]) for g in fake.submitted] == [
+        (64, 32),
+        (64, 48),
+        (128, 32),
+        (128, 48),
+    ]
+
+
+def test_sweep_refuses_uneven_param_lists_without_cross(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    r = runner.invoke(
+        cl.cli,
+        ["--json", "--session", p, "sweep", "--param", "1.width=64,128", "--param", "1.height=32"],
+    )
+    assert r.exit_code == 1 and "same length" in r.output
+
+
+@pytest.mark.parametrize(
+    "args,expected",
+    [
+        ([], "nothing to vary"),
+        (["--param", "width=64"], "NODE.INPUT"),
+        (["--param", "1width=64"], "NODE.INPUT"),
+        (["--param", "1.seed="], "empty value"),
+    ],
+)
+def test_sweep_argument_errors_are_loud(tmp_path, args, expected):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", p, "sweep", *args])
+    assert r.exit_code == 1 and expected in r.output
+
+
+def test_sweep_plan_that_exists_but_is_not_json_dies(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    plan = tmp_path / "plan.json"
+    plan.write_text("{not json", encoding="utf-8")
+    r = runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--plan", str(plan)])
+    assert r.exit_code == 1 and "not valid JSON" in r.output
+
+
+def test_sweep_plan_file_that_is_missing_fails_loudly(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--plan", "nope.json"])
+    assert r.exit_code != 0 and "nope.json" in r.output
+
+
+def test_sweep_refuses_param_and_plan_together(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([{"set": {"1": {"width": 1}}}]), encoding="utf-8")
+    r = runner.invoke(
+        cl.cli, ["--json", "--session", p, "sweep", "--param", "1.width=64", "--plan", str(plan)]
+    )
+    assert r.exit_code == 1 and "OR --param" in r.output
+
+
+def test_sweep_plan_file_drives_explicit_variants(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    plan = tmp_path / "plan.json"
+    plan.write_text(
+        json.dumps(
+            [
+                {"label": "tall", "set": {"1": {"width": 64, "height": 128}}},
+                {"set": {"1": {"width": 128}}},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    d = json.loads(
+        runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--plan", str(plan)]).output
+    )
+    assert d["succeeded"] == 2
+    assert d["results"][0]["label"] == "tall"
+    assert d["results"][1]["label"] == "variant 2/2", "an unlabelled plan variant gets a default"
+    assert fake.submitted[0]["1"]["inputs"]["height"] == 128
+
+
+def test_sweep_with_a_bad_plan_shape_dies(tmp_path):
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps([{"label": "no set"}]), encoding="utf-8")
+    r = runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--plan", str(plan)])
+    assert r.exit_code == 1 and "'set'" in r.output
+
+
+def test_sweep_exits_1_when_a_variant_fails(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY, fail_on={1})
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--param", "1.width=64,128,256"])
+    assert r.exit_code == 1
+    d = json.loads(r.output)
+    assert d["succeeded"] == 2 and d["failed"] == 1
+
+
+def test_sweep_downloads_every_produced_file(tmp_path, monkeypatch):
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    dest = tmp_path / "out"
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            [
+                "--json",
+                "--session",
+                p,
+                "sweep",
+                "--param",
+                "1.width=64,128",
+                "--download",
+                str(dest),
+            ],
+        ).output
+    )
+    assert d["download"]["downloaded"] == 2 and dest.is_dir()
+    assert fake.freed == 1, "VRAM freed between the two variants"
+
+
+def test_sweep_on_a_bad_patch_fails_that_variant_and_exits_1(tmp_path, monkeypatch):
+    """The typo case: no queue slot spent, exit 1, the error names the node."""
+    fake = FakeClient(outputs=OUT_ENTRY)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyImage", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", p, "sweep", "--param", "99.width=1,2"])
+    assert r.exit_code == 1
+    d = json.loads(r.output)
+    assert d["failed"] == 2 and "no node 99" in d["results"][0]["error"]
+    assert fake.submitted == [], "nothing was queued"

@@ -9,9 +9,11 @@ surfaced instead of a bare HTTP 400.
 
 from __future__ import annotations
 
+import copy
 import os
 import time
 
+from cli_anything.comfyui.core import workflow as wf
 from cli_anything.comfyui.utils.comfyui_backend import outputs_of
 
 
@@ -120,6 +122,90 @@ def run_windows(client, graphs, timeout=1800, free_between=True, on_window=None)
     ok = [r for r in results if r.get("ok")]
     return {
         "windows": len(graphs),
+        "succeeded": len(ok),
+        "failed": len(results) - len(ok),
+        "results": results,
+        "outputs": [f for r in ok for f in r.get("outputs", [])],
+    }
+
+
+def run_sweep(
+    client,
+    api,
+    variants,
+    timeout=1800,
+    poll=1.0,
+    front=False,
+    free_between=True,
+    on_result=None,
+    extra_data=None,
+):
+    """Run ONE graph many times, varying named inputs each pass.
+
+    A parameter sweep — vary the seed, the steps, the prompt — is the single
+    most-scripted loop over ComfyUI, and before this it was assembled by hand
+    from `workflow set` + `run`, which mutated the session graph and left the
+    overrides baked in. Each variant here is patched onto a DEEP COPY; the
+    graph the caller handed in is never modified.
+
+    Each variant is `{"label": str?, "set": {node_id: {input: value}}}`. A
+    variant whose patch names an unknown node or input fails immediately and
+    does NOT spend a queue slot — the same WorkflowError `workflow set` raises,
+    reported before submission.
+
+    As with `run_windows`, a failed variant does not abort the rest — losing
+    variant 7 of 12 should still hand back the other eleven — and VRAM is freed
+    between variants because the alternative is documented: models stay
+    resident and the card fills.
+    """
+    results = []
+    for i, variant in enumerate(variants):
+        label = variant.get("label") or f"variant {i + 1}/{len(variants)}"
+        graph = copy.deepcopy(api)
+        try:
+            for nid, inputs in (variant.get("set") or {}).items():
+                for name, value in inputs.items():
+                    wf.set_input(graph, nid, name, value)
+        except wf.WorkflowError as exc:
+            res = {
+                "variant": i,
+                "label": label,
+                "ok": False,
+                "error": str(exc),
+                "outputs": [],
+                "output_count": 0,
+            }
+            results.append(res)
+            if on_result:
+                on_result(dict(res))
+            continue
+        try:
+            res = submit_and_wait(
+                client, graph, timeout=timeout, poll=poll, front=front, extra_data=extra_data
+            )
+            res["variant"] = i
+            res["label"] = label
+            res["ok"] = True
+        except Exception as exc:  # noqa: BLE001 — reported, not swallowed
+            res = {
+                "variant": i,
+                "label": label,
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "outputs": [],
+                "output_count": 0,
+            }
+        results.append(res)
+        if on_result:
+            on_result(dict(res))
+        if free_between and i < len(variants) - 1:
+            try:
+                client.free()
+            except Exception as exc:  # noqa: BLE001
+                res.setdefault("warnings", []).append(f"free failed: {exc}")
+    ok = [r for r in results if r.get("ok")]
+    return {
+        "variants": len(variants),
         "succeeded": len(ok),
         "failed": len(results) - len(ok),
         "results": results,

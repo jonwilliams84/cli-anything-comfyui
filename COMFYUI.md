@@ -84,6 +84,14 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
                /models listings), get/set/unset a node input, export the
                patched graph, diff it against a file
     run        submit a graph and wait, with progress
+    sweep      run ONE graph many times, varying named inputs (--param
+               NODE.INPUT=v1,v2 zipped, --cross for the cartesian product,
+               --plan variants.json for explicit variants): the parameter
+               sweep that used to mean a shell loop of `workflow set` + `run`.
+               Each variant is patched onto a deep copy — the session graph is
+               untouched — VRAM is freed between variants, a failed variant
+               does not abort the rest, and a patch naming an unknown node
+               fails THAT variant before submission, costing no queue slot
     windows    the OOM-guarded window loop: several graphs, VRAM freed between,
                a failed window does not abort the rest
     queue      list / wait <id> / cancel / clear
@@ -131,3 +139,29 @@ is not guessable (`loras`? `Lora`? `diffusion_models`?), so the check is
 membership anywhere, not membership in a predicted folder. A graph with no
 model inputs never polls /models at all, so a folder outage cannot fail an
 irrelevant check. Exits 1 when something is missing.
+
+### Batch variation: `sweep`, and why it is not `windows`
+
+The most-scripted loop over this server is varying one input of one graph — a
+seed, a width, a prompt — across N renders. The API has no batch endpoint for
+it: every variation is its own `POST /prompt`, and the honest way to drive it
+is to patch the graph per variant and queue once per variant. `windows` is the
+wrong tool: it takes whole FILES (different graphs), not variations of one, and
+before v0.16 the sweep was assembled by hand from `workflow set` + `run`, which
+mutates the session graph, leaves the last override baked in, and loses the
+mapping between variant and prompt id.
+
+`sweep` does it in one command. Variants are built three ways, in order of
+explicitness: `--param NODE.INPUT=v1,v2,…` (repeatable; the value lists are
+ZIPPED — uneven lengths are an error, not a silent truncation — and `--cross`
+takes the cartesian product), or `--plan variants.json`, a JSON array of
+`{"label", "set": {node: {input: value}}}` for arbitrary combinations and for
+values a comma would shred. A value is parsed as JSON when it parses, else kept
+as a string — the same rule as `workflow set`, so `1.batch_size=2,1` queues
+integers. Each variant is patched onto a DEEP COPY with the same `wf.set_input`
+the CLI patch loop uses: a patch naming an unknown node or input fails THAT
+variant before submission (no queue slot spent), and the caller's graph — the
+session's — is never modified. The failure conventions are `run_windows`'s: a
+failed variant does not abort the rest, VRAM is freed between variants
+(`--keep-vram` opts out), and the summary reports `succeeded`/`failed` with
+exit 1 if anything failed, so `sweep … && merge-the-outputs` chains stop.
