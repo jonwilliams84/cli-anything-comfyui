@@ -23,7 +23,7 @@ from cli_anything.comfyui.utils.comfyui_backend import (
     outputs_of,
 )
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 
@@ -431,6 +431,10 @@ def workflow_convert(ctx, path, out, do_load, strict, keep_muted, json_):
         saved = _autosave(ctx, st)
     payload = {"source": path, "out": out, "nodes": len(api), **report, "session": saved}
     lines = [f"converted {report.get('nodes_in', '?')} canvas nodes -> {len(api)} API nodes"]
+    for s in report.get("subgraphs_expanded", [])[:8]:
+        lines.append(
+            f"  expanded subgraph {s['name']} (node {s['node']}) -> {s['nodes_out']} nodes"
+        )
     for d in report.get("dropped", [])[:8]:
         lines.append(f"  dropped node {d['node']} ({d['class_type']}): {d['why']}")
     for w in report.get("warnings", [])[:8]:
@@ -460,6 +464,7 @@ def workflow_deps(ctx, path, json_):
         "source": path,
         "missing_node_types": report["missing_node_types"],
         "subgraphs": report["subgraphs"],
+        "subgraphs_expanded": report.get("subgraphs_expanded", []),
         "nodes": len(api),
         "satisfied": not report["missing_node_types"],
     }
@@ -472,6 +477,8 @@ def workflow_deps(ctx, path, json_):
             lines += [f"  {t}" for t in payload["missing_node_types"]]
         for s in payload["subgraphs"]:
             lines.append(f"  subgraph (not expanded): {s['name']}")
+    for s in report.get("subgraphs_expanded", []):
+        lines.append(f"  subgraph (expanded): {s['name']} -> {s['nodes_out']} node(s)")
     emit(ctx, payload, lines)
 
 
@@ -743,6 +750,49 @@ def workflow_models(ctx, path, json_):
     emit(ctx, payload, lines)
     if not res["ok"]:
         sys.exit(1)
+
+
+@workflow.command("subgraphs")
+@click.argument("path", type=click.Path())
+@json_option
+@click.pass_context
+def workflow_subgraphs(ctx, path, json_):
+    """The subgraph definitions a canvas carries, readable before conversion.
+
+    A subgraph instance node's class_type is a bare UUID — nothing about it is
+    inspectable without opening `definitions.subgraphs[]`. This names the body
+    of each definition: inner nodes, the inputs and outputs it exposes, the
+    widgets it promotes, which canvas nodes instantiate it, and whether
+    `workflow convert` can expand it here.
+    """
+    _merge_json(ctx, json_)
+    try:
+        ui = wf.load(path)
+        inv = wf.subgraph_inventory(ui)
+    except (wf.WorkflowError, ComfyError) as exc:
+        die(str(exc))
+    payload = {"source": path, "count": len(inv), "subgraphs": inv}
+    lines = [f"{len(inv)} subgraph definition(s) in {path}"]
+    for s in inv:
+        used = f", used by node(s) {', '.join(s['instances'])}" if s["instances"] else ""
+        lines.append(f"  {s['name']}  ({s['id'][:8]}…){used}")
+        lines.append(
+            f"    nodes: {s['nodes']}  links: {s['links']}" + ("  (nested)" if s["nested"] else "")
+        )
+        if s["inputs"]:
+            lines.append(
+                "    inputs: " + ", ".join(f"{i['name']} ({i['type']})" for i in s["inputs"])
+            )
+        if s["outputs"]:
+            lines.append(
+                "    outputs: " + ", ".join(f"{o['name']} ({o['type']})" for o in s["outputs"])
+            )
+        if s["widgets"]:
+            lines.append("    widgets: " + ", ".join(w["name"] for w in s["widgets"]))
+        lines.append(
+            "    expandable: yes" if s["expandable"] else f"    expandable: NO — {s['why_not']}"
+        )
+    emit(ctx, payload, lines)
 
 
 def _graph(ctx, path):
@@ -1623,7 +1673,7 @@ def repl(ctx):
         "status": "session + server state",
         "server": "status / features / embeddings / free / interrupt / logs",
         "nodes": "list / search / schema",
-        "workflow": "convert / deps / models / info / find / set / unset / validate / export / diff",
+        "workflow": "convert / deps / models / info / find / set / unset / validate / export / diff / subgraphs",
         "run": "queue the loaded graph and wait",
         "sweep": "run ONE graph many times, varying named inputs",
         "windows": "run several graphs, freeing VRAM between them",

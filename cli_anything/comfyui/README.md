@@ -35,7 +35,8 @@ cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, whi
 cli-anything-comfyui nodes categories           # category prefixes installed here, with counts
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
 cli-anything-comfyui workflow models my-api.json  # are the model FILES it names on the server
-cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
+cli-anything-comfyui workflow subgraphs my.json # what each subgraph definition contains
+cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph (subgraphs expand)
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui workflow unset 3 seed      # remove one input override
@@ -119,8 +120,6 @@ file. See `tests/TEST.md`.
 
 ## Not built yet
 
-- **Subgraph expansion.** A node whose `class_type` is a bare UUID is a subgraph
-  instance; the harness names it and refuses rather than converting it wrongly.
 - **`review`** — contact sheets and frame sampling of produced video.
 - Windowed rendering (`windows`) is a CLI command, unit-tested against a fake
   client, but has no E2E test yet.

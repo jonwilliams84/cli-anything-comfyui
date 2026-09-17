@@ -34,7 +34,8 @@ cli-anything-comfyui nodes schema KSampler      # inputs: which are widgets, whi
 cli-anything-comfyui nodes categories           # category prefixes installed here, with counts
 cli-anything-comfyui workflow deps my.json      # which node packs this canvas needs
 cli-anything-comfyui workflow models my-api.json  # are the model FILES it names on the server
-cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph
+cli-anything-comfyui workflow subgraphs my.json # what each subgraph definition contains
+cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph (subgraphs expand)
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
 cli-anything-comfyui run --download ./out       # queue, wait, fetch what it made
@@ -96,6 +97,22 @@ NODE.INPUT=v1,v2` zipped, `--cross` for the product, `--plan variants.json`
 for arbitrary combinations), VRAM is freed between variants, a failed variant
 does not abort the rest, and a patch naming an unknown node costs no queue slot.
 
+**Subgraphs, expanded instead of refused.** A node whose `class_type` is a bare
+UUID is a subgraph instance: its body lives in the canvas under
+`definitions.subgraphs[]` and no server knows its name. `workflow convert` now
+expands them in place — the body's nodes enter the API graph with ids
+`"<instance>:<inner>"` (`2:e`, `2:b`, …), the instance's exposed inputs are fed
+by name from the parent graph's wires or the instance's promoted widget values,
+consumers of the instance's outputs are rewired to the inner node that produces
+the value, and nesting expands recursively. That makes every downstream check
+see through the boundary: `workflow deps` names the node TYPES a subgraph's
+body needs, `workflow models` checks the FILES it names, `workflow validate`
+checks its shape. `workflow subgraphs my.json` lists what each definition
+contains — inner nodes, exposed inputs/outputs, promoted widgets, which canvas
+nodes instantiate it, and whether it can be expanded here — before conversion.
+A definition with no body (or nesting past 10 deep) stays unexpanded and is
+reported with the reason rather than faked.
+
 ## Session
 
 State lives in `~/.config/cli-anything-comfyui/session.json`: the server URL, the
@@ -114,8 +131,6 @@ file. See `tests/TEST.md`.
 
 ## Not built yet
 
-- **Subgraph expansion.** A node whose `class_type` is a bare UUID is a subgraph
-  instance; the harness names it and refuses rather than converting it wrongly.
 - **`review`** — contact sheets and frame sampling of produced video.
 - **Userdata copy is client-side.** `userdata move` wraps the server's
   `POST /userdata/{path}/move/{to}`; `userdata copy` composes a GET and a PUT

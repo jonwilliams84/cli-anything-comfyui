@@ -203,7 +203,7 @@ class TestCLISubprocess:
         assert "ComfyUI" in self._run(["--help"]).stdout
 
     def test_version(self):
-        assert "0.16.0" in self._run(["--version"]).stdout
+        assert "0.17.0" in self._run(["--version"]).stdout
 
     def test_server_status_json(self):
         d = json.loads(self._run(["--json", "server", "status"]).stdout)
@@ -700,3 +700,114 @@ class TestCLISweep:
         assert proc.returncode == 1
         d = json.loads(proc.stdout)
         assert d["failed"] == 2 and "no node 99" in d["results"][0]["error"]
+
+
+class TestCLISubgraphSubprocess:
+    """Subgraph expansion, through the installed CLI against the live server.
+
+    The prefixed ids ("2:e") go to POST /prompt verbatim — this is also where
+    the assumption that the server accepts opaque string node ids is pinned.
+    """
+
+    CLI_BASE = _resolve_cli("cli-anything-comfyui")
+
+    def _run(self, args, check=True):
+        proc = subprocess.run(
+            self.CLI_BASE + args, capture_output=True, text=True, timeout=600, check=False
+        )
+        if check:
+            assert proc.returncode == 0, f"{args} -> {proc.returncode}\n{proc.stderr[-2000:]}"
+        return proc
+
+    def _subgraph_canvas(self, tmp_path):
+        """A canvas whose image source is a subgraph instance."""
+        uuid = "e2e00000-2222-4333-8444-555555555555"
+        canvas = str(tmp_path / "sg.json")
+        with open(canvas, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "nodes": [
+                        {
+                            "id": 2,
+                            "type": uuid,
+                            "mode": 0,
+                            "inputs": [],
+                            "outputs": [{"name": "IMAGE", "type": "IMAGE", "links": [8]}],
+                            "widgets_values": [],
+                        },
+                        {
+                            "id": 5,
+                            "type": "SaveImage",
+                            "mode": 0,
+                            "inputs": [{"name": "images", "link": 8}],
+                            "widgets_values": ["cli_e2e_subgraph"],
+                        },
+                    ],
+                    "links": [[8, 2, 0, 5, 0, "IMAGE"]],
+                    "definitions": {
+                        "subgraphs": [
+                            {
+                                "id": uuid,
+                                "name": "E2E Image Source",
+                                "inputNode": {"id": "in", "name": "Input", "inputs": []},
+                                "outputNode": {
+                                    "id": "out",
+                                    "name": "Output",
+                                    "outputs": [{"id": "o1", "name": "IMAGE", "type": "IMAGE"}],
+                                },
+                                "nodes": [
+                                    {
+                                        "id": "e",
+                                        "type": "EmptyImage",
+                                        "mode": 0,
+                                        "inputs": [],
+                                        "widgets_values": [64, 64, 1, 0],
+                                    }
+                                ],
+                                "links": [[100, "e", 0, "out", 0, "IMAGE"]],
+                            }
+                        ]
+                    },
+                },
+                fh,
+            )
+        return canvas
+
+    def test_workflow_subgraphs_lists_the_definitions(self, tmp_path):
+        canvas = self._subgraph_canvas(tmp_path)
+        d = json.loads(self._run(["--json", "workflow", "subgraphs", canvas]).stdout)
+        assert d["count"] == 1
+        s = d["subgraphs"][0]
+        assert s["name"] == "E2E Image Source" and s["nodes"] == 1
+        assert s["expandable"] is True
+        human = self._run(["workflow", "subgraphs", canvas])
+        assert "E2E Image Source" in human.stdout and "expandable: yes" in human.stdout
+
+    def test_convert_expands_and_the_server_accepts_the_graph(self, tmp_path):
+        canvas = self._subgraph_canvas(tmp_path)
+        out = str(tmp_path / "api.json")
+        d = json.loads(self._run(["--json", "workflow", "convert", canvas, "-o", out]).stdout)
+        assert [s["name"] for s in d["subgraphs_expanded"]] == ["E2E Image Source"]
+        with open(out, encoding="utf-8") as fh:
+            api = json.load(fh)
+        assert "2:e" in api, "the instance is gone, its body is in"
+        assert api["5"]["inputs"]["images"] == ["2:e", 0]
+
+    def test_deps_reports_the_expansion(self, tmp_path):
+        canvas = self._subgraph_canvas(tmp_path)
+        d = json.loads(self._run(["--json", "workflow", "deps", canvas]).stdout)
+        assert d["satisfied"] is True
+        assert [s["name"] for s in d["subgraphs_expanded"]] == ["E2E Image Source"]
+
+    def test_a_render_from_an_expanded_subgraph_produces_a_png(self, tmp_path):
+        canvas = self._subgraph_canvas(tmp_path)
+        out = str(tmp_path / "api.json")
+        self._run(["--json", "workflow", "convert", canvas, "-o", out])
+        dl = str(tmp_path / "out")
+        r = json.loads(self._run(["--json", "run", "--path", out, "--download", dl]).stdout)
+        assert r["output_count"] > 0
+        files = [f for f in r["download"]["files"] if f["ok"]]
+        assert files, "the expanded graph queued, ran and produced nothing"
+        with open(files[0]["path"], "rb") as fh:
+            assert fh.read(8) == b"\x89PNG\r\n\x1a\n"
+        print(f"\n  subprocess subgraph render: {files[0]['path']} ({files[0]['bytes']:,} bytes)")

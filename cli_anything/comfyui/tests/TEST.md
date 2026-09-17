@@ -12,8 +12,8 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — 225 unit tests, synthetic graphs and a fake client, no server
-- `test_full_e2e.py` — ~35 tests against the real server, including subprocess
+- `test_core.py` — 244 unit tests, synthetic graphs and a fake client, no server
+- `test_full_e2e.py` — ~40 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
 
@@ -565,3 +565,37 @@ variations of one.
 - 4 new E2E tests in `test_full_e2e.py`: a core-level 2-variant sweep that
   verifies both renders' PNG magic bytes, and subprocess tests of the CLI with
   `--param`, a `--plan` file, and the unknown-node exit-1 path.
+
+## 2026-09-17 — v0.17.0: subgraph expansion
+
+The flagship "not built yet" item from 0.1.0, now built: a node whose
+`class_type` is a bare UUID (a subgraph instance) is EXPANDED in place during
+conversion instead of refused.
+
+- `workflow convert` expands instances recursively: inner ids prefixed
+  `<instance>:<inner>`, exposed inputs fed by name (parent wire, resolved
+  through bypasses, or promoted widget value — positional against the
+  definition's `widgets` list or a name-keyed dict), exposed outputs rewired
+  to the inner origin by a fixpoint pass that also settles
+  instance-feeds-instance chains, boundary rows targeting nested instances
+  injected through the recursion with parent-level node ids exempt from the
+  dangling-wire cleanup for that hop. `report["subgraphs_expanded"]` names
+  each expansion; inner warnings/drops/missing types carry the prefixed id so
+  `workflow deps` sees through subgraphs. A body-less definition (or nesting
+  past depth 10) stays unexpanded WITH its reason.
+- **`workflow subgraphs PATH`** — the definitions before conversion: name, id,
+  inner nodes/links, exposed inputs/outputs, promoted widgets, instantiating
+  canvas nodes, expandable + why not.
+- 19 new unit tests in `test_core.py` (244 total, all passing): full expansion
+  wiring both directions, two instances without collision, widget value by
+  position / by name / definition-default fallback, feed resolved through a
+  bypass, instance→instance settling, recursive nesting with the OUTER
+  instance's widget value landing inside, prefixed missing types (strict
+  raise), prefixed inner warnings/drops, depth cap on a self-referential
+  definition, `subgraph_inventory`, the already-API report key, and CLI tests
+  for convert/deps/subgraphs including the unexpandable-subgraph path.
+- 4 new E2E subprocess tests in `test_full_e2e.py`: `workflow subgraphs`
+  against a real canvas, convert expansion where the server ACCEPTS the
+  prefixed ids, `deps` reporting the expansion, and a full render from the
+  expanded graph whose downloaded file is checked for PNG magic bytes.
+- Version pins updated 0.16.0 → 0.17.0 in both test files.
