@@ -25,6 +25,7 @@ THE OFF-BY-ONE THAT BREAKS EVERY HAND-ROLLED CONVERTER
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 
@@ -44,6 +45,12 @@ REROUTE_TYPES = {"Reroute", "RerouteNode", "Reroute (rgthree)"}
 MODE_MUTED = 2
 MODE_BYPASSED = 4
 
+#: How deep a subgraph may nest inside a subgraph before the harness stops
+#: trusting the graph and reports the outermost instance unexpanded. Also the
+#: cap on the fixpoint that rewires wires through expanded instances — a
+#: canvas is acyclic, but a hostile one is not.
+MAX_SUBGRAPH_DEPTH = 10
+
 
 def subgraph_defs(ui):
     """uuid -> name, for the subgraphs this workflow carries.
@@ -59,6 +66,314 @@ def subgraph_defs(ui):
         for d in defs
         if isinstance(d, dict) and d.get("id")
     }
+
+
+def subgraph_definitions(ui):
+    """uuid -> the FULL subgraph definition, not just the name.
+
+    Expansion needs the body: `inputNode`, `outputNode`, the inner `nodes` and
+    `links`, the promoted `widgets`. `subgraph_defs` stays for callers that
+    only want display names.
+    """
+    defs = (ui.get("definitions") or {}).get("subgraphs") or []
+    return {str(d.get("id")): d for d in defs if isinstance(d, dict) and d.get("id")}
+
+
+class _ExpansionBlocked(Exception):
+    """This subgraph definition cannot be expanded; it stays reported."""
+
+
+def _subgraph_block_reason(d):
+    """Why this definition cannot be expanded, or None if it can."""
+    if not (d.get("nodes") or []):
+        return "the definition carries no nodes"
+    return None
+
+
+def _row_ends(row):
+    """(link_id, origin_id, origin_slot, target_id, target_slot) from either link shape."""
+    if isinstance(row, dict):
+        return (
+            row.get("id"),
+            str(row.get("origin_id")),
+            int(row.get("origin_slot") or 0),
+            str(row.get("target_id")),
+            int(row.get("target_slot") or 0),
+        )
+    if isinstance(row, (list, tuple)) and len(row) >= 5:
+        return row[0], str(row[1]), int(row[2]), str(row[3]), int(row[4])
+    return None
+
+
+def _exposed_widget_value(instance, definition, name):
+    """The VALUE an instance feeds an exposed WIDGET input.
+
+    A subgraph widget is promoted to an input slot on the instance node; the
+    value lives in the instance's `widgets_values`, positionally against the
+    definition's `widgets` list. Some packs serialise by name (a dict), and a
+    definition may carry its own default when the instance has nothing.
+    """
+    wname = name
+    for i in instance.get("inputs") or []:
+        w = i.get("widget") or {}
+        if isinstance(w, dict) and w.get("name") and i.get("name") == name:
+            wname = w["name"]
+            break
+    wv = instance.get("widgets_values")
+    if isinstance(wv, dict):
+        return wv.get(wname, wv.get(name))
+    for i, w in enumerate(definition.get("widgets") or []):
+        if isinstance(w, dict) and w.get("name") == wname:
+            if isinstance(wv, list) and i < len(wv):
+                return wv[i]
+            return w.get("value")
+    return None
+
+
+def _expand_instance(
+    nid, node, defs, object_info, links, nodes_by_id, keep_muted, depth, feeds, external
+):
+    """Expand ONE subgraph instance into the API nodes its body contains.
+
+    The instance node's `type` is a bare UUID naming a definition in
+    `definitions.subgraphs[]`. The body is a whole canvas in miniature — its own
+    nodes, its own links — plus two boundary markers:
+
+      - `inputNode`: its `inputs[]` are the slots the instance EXPOSES. Inner
+        link rows whose ORIGIN is the inputNode carry an exposed input into the
+        body; the value comes from the instance's own inputs (a link from the
+        parent graph, or a promoted widget's value).
+      - `outputNode`: inner link rows whose TARGET is the outputNode define
+        what each exposed output IS; the parent graph's consumers of that
+        instance output are rewired to the inner origin.
+
+    The body is converted by calling `to_api` recursively — bypasses, reroutes,
+    the control_after_generate off-by-one and nested subgraphs all just apply —
+    then inner node ids are prefixed `"<instance>:<inner>"` so two instances of
+    the same subgraph cannot collide, exposed inputs are patched in by NAME,
+    and the exposed-output sources are returned so the caller can rewire the
+    parent.
+
+    Returns `(fragment, out_map, report_bits)`.
+    """
+    feeds = dict(feeds or {})
+    external = set(external or ())
+    d = defs[node["type"]]
+    reason = _subgraph_block_reason(d)
+    if reason:
+        raise _ExpansionBlocked(reason)
+    in_node = d.get("inputNode") or {}
+    out_node = d.get("outputNode") or {}
+    in_id = str(in_node.get("id") or "")
+    out_id = str(out_node.get("id") or "")
+    inner_nodes = [copy.deepcopy(n) for n in (d.get("nodes") or []) if isinstance(n, dict)]
+    nested = (d.get("definitions") or {}).get("subgraphs") or []
+    nested_defs = {str(g.get("id")) for g in nested if isinstance(g, dict) and g.get("id")}
+
+    # Partition the body's links: boundary rows are consumed here, the rest go
+    # to the inner conversion untouched.
+    inner_links = []
+    in_rows = {}  # inner link id -> exposed input slot index
+    consumers = {}  # inner link id -> (inner target node id, input name)
+    inst_feeds = []  # (inner target instance id, exposed input slot)
+    out_rows = []  # (row, exposed output slot index)
+    for row in d.get("links") or []:
+        ends = _row_ends(row)
+        if ends is None:
+            continue
+        lid, origin, oslot, target, tslot = ends
+        if in_id and origin == in_id:
+            in_rows[lid] = oslot
+            tgt = next((n for n in inner_nodes if str(n.get("id")) == target), None)
+            if tgt is not None and str(tgt.get("type")) in nested_defs:
+                # The consumer is itself a subgraph instance: leave its exposed
+                # input entry alone and inject the value after the recursive
+                # conversion — stripping it would blind that instance's own
+                # expansion to the wire.
+                inst_feeds.append((target, oslot))
+                continue
+            if tgt is not None:
+                kept, taken = [], None
+                for i in tgt.get("inputs") or []:
+                    if taken is None and i.get("link") == lid:
+                        taken = i.get("name")
+                    else:
+                        kept.append(i)
+                tgt["inputs"] = kept
+                consumers[lid] = (target, taken)
+            continue
+        if out_id and target == out_id:
+            out_rows.append((row, tslot))
+            continue
+        inner_links.append(copy.deepcopy(row))
+
+    # What the instance was fed for one exposed input: a value injected by the
+    # parent expansion (a nested instance's wire), else the parent link's
+    # resolved source, else the promoted widget's value.
+    def _feed_value(name, slot):
+        if not name:
+            return None
+        hit = feeds.get((str(nid), name))
+        if hit is not None:
+            return hit
+        entry = None
+        for i in node.get("inputs") or []:
+            if i.get("name") == name:
+                entry = i
+                break
+        if entry is None:
+            inst_inputs = node.get("inputs") or []
+            if slot < len(inst_inputs):
+                entry = inst_inputs[slot]
+        value = None
+        if entry is not None and entry.get("link") is not None:
+            src = links.get(entry["link"])
+            if src is not None:
+                value = list(_resolve_through_bypass(src[0], src[1], nodes_by_id, links) or ())
+        if value is None and entry is not None:
+            value = _exposed_widget_value(node, d, entry.get("name") or "")
+        return value
+
+    # Values for boundary rows whose consumer is a NESTED instance: the nested
+    # conversion cannot see this graph's links, so they travel in explicitly.
+    inner_feeds = {}
+    inner_external = set(external)
+    exposed_inputs = in_node.get("inputs") or []
+    for target, slot in inst_feeds:
+        exposed = exposed_inputs[slot] if slot < len(exposed_inputs) else None
+        name = exposed.get("name") if isinstance(exposed, dict) else None
+        value = _feed_value(name, slot)
+        if value:
+            inner_feeds[(str(target), name)] = value
+            if isinstance(value, list) and len(value) == 2:
+                inner_external.add(str(value[0]))
+
+    inner_ui = {"nodes": inner_nodes, "links": inner_links}
+    if nested:
+        inner_ui["definitions"] = {"subgraphs": nested}
+    inner_api, inner_rep = to_api(
+        inner_ui,
+        object_info,
+        keep_muted=keep_muted,
+        strict=False,
+        _depth=depth + 1,
+        _feeds=inner_feeds or None,
+        _external=inner_external or None,
+    )
+
+    # Prefix inner ids so two instances of one subgraph cannot collide.
+    idmap = {k: f"{nid}:{k}" for k in inner_api}
+    inner_api = {idmap[k]: v for k, v in inner_api.items()}
+    for entry in inner_api.values():
+        for name, val in (entry.get("inputs") or {}).items():
+            if isinstance(val, list) and len(val) == 2 and str(val[0]) in idmap:
+                entry["inputs"][name] = [idmap[str(val[0])], val[1]]
+
+    # Exposed inputs: what the instance was fed, by NAME, onto the inner node.
+    for lid, slot in in_rows.items():
+        exposed = exposed_inputs[slot] if slot < len(exposed_inputs) else None
+        name = exposed.get("name") if isinstance(exposed, dict) else None
+        tid, tname = consumers.get(lid, (None, None))
+        if tid is None or tname is None or str(tid) not in idmap:
+            continue
+        value = _feed_value(name, slot)
+        if value:
+            inner_api[idmap[str(tid)]]["inputs"][tname] = value
+
+    # Exposed outputs: the parent is rewired to the inner origin, keyed by the
+    # instance's output slot — the caller fixes up every wire that pointed at
+    # the instance, and chains of instance-feeding-instance settle in that pass.
+    out_map = {}
+    out_exposed = out_node.get("outputs") or []
+    for row, exposed_slot in out_rows:
+        ends = _row_ends(row)
+        if ends is None:
+            continue
+        _lid, origin, oslot, _t, _ts = ends
+        if str(origin) not in idmap:
+            continue
+        exposed = out_exposed[exposed_slot] if exposed_slot < len(out_exposed) else None
+        oname = exposed.get("name") if isinstance(exposed, dict) else None
+        inst_slot = None
+        for i, o in enumerate(node.get("outputs") or []):
+            if o.get("name") == oname:
+                inst_slot = i
+                break
+        if inst_slot is None and exposed_slot < len(node.get("outputs") or []):
+            inst_slot = exposed_slot
+        if inst_slot is not None:
+            out_map[(str(nid), inst_slot)] = (idmap[origin], oslot)
+
+    def _prefixed(rows):
+        for r in rows:
+            if isinstance(r, dict) and r.get("node") is not None:
+                r["node"] = f"{nid}:{r['node']}"
+        return rows
+
+    bits = {
+        "warnings": _prefixed(inner_rep.get("warnings") or []),
+        "dropped": _prefixed(inner_rep.get("dropped") or []),
+        "missing": _prefixed(inner_rep.get("missing") or []),
+        "unsupported": _prefixed(inner_rep.get("subgraphs") or []),
+        "expanded": {
+            "node": str(nid),
+            "name": d.get("name") or "unnamed subgraph",
+            "nodes_out": len(inner_api),
+            "nested": bool(nested),
+        },
+    }
+    return inner_api, out_map, bits
+
+
+def subgraph_inventory(ui):
+    """What each subgraph definition in a canvas contains, before conversion.
+
+    A subgraph instance's `type` is a bare UUID, so nothing about it is
+    readable without opening `definitions.subgraphs[]`. This names the body —
+    inner nodes, exposed inputs/outputs, promoted widgets, which canvas nodes
+    are instances of it — and whether the harness can expand it here.
+    """
+    defs = [
+        d for d in ((ui.get("definitions") or {}).get("subgraphs") or []) if isinstance(d, dict)
+    ]
+    by_id = {str(d.get("id")): d for d in defs if d.get("id")}
+    instances = {}
+    for n in ui.get("nodes") or []:
+        t = str(n.get("type") or "")
+        if t in by_id:
+            instances.setdefault(t, []).append(str(n.get("id")))
+    inv = []
+    for d in defs:
+        did = str(d.get("id"))
+        reason = _subgraph_block_reason(d)
+        inv.append(
+            {
+                "id": did,
+                "name": d.get("name") or "unnamed subgraph",
+                "instances": instances.get(did) or [],
+                "nodes": len(d.get("nodes") or []),
+                "links": len(d.get("links") or []),
+                "inputs": [
+                    {"name": i.get("name"), "type": i.get("type")}
+                    for i in ((d.get("inputNode") or {}).get("inputs") or [])
+                    if isinstance(i, dict)
+                ],
+                "outputs": [
+                    {"name": o.get("name"), "type": o.get("type")}
+                    for o in ((d.get("outputNode") or {}).get("outputs") or [])
+                    if isinstance(o, dict)
+                ],
+                "widgets": [
+                    {"name": w.get("name"), "value": w.get("value")}
+                    for w in (d.get("widgets") or [])
+                    if isinstance(w, dict)
+                ],
+                "nested": bool((d.get("definitions") or {}).get("subgraphs")),
+                "expandable": reason is None,
+                "why_not": reason,
+            }
+        )
+    return sorted(inv, key=lambda s: (s["name"], s["id"]))
 
 
 class WorkflowError(ValueError):
@@ -171,14 +486,29 @@ def _resolve_through_bypass(node_id, slot, nodes_by_id, links, seen=None):
     return None
 
 
-def to_api(ui, object_info, keep_muted=False, strict=True):
+def to_api(ui, object_info, keep_muted=False, strict=True, _depth=0, _feeds=None, _external=None):
     """UI workflow -> API graph the server will accept.
 
     Returns `(api_graph, report)`. The report names every node that was dropped
     and why, because a silent drop is indistinguishable from a graph that never
     had the node — and that is exactly how a render comes back missing its
     upscale pass.
+
+    Subgraph instances (a node whose `type` is a bare UUID naming a definition
+    in `definitions.subgraphs[]`) are EXPANDED in place: the body's nodes enter
+    the graph with ids `"<instance>:<inner>"`, the instance's exposed inputs are
+    fed by name, and consumers of the instance's outputs are rewired to the
+    inner node that produces the value. A definition with no body (or nesting
+    past :data:`MAX_SUBGRAPH_DEPTH`) stays unexpanded and is reported in
+    `report["subgraphs"]` with the reason.
+
+    `_feeds` / `_external` are expansion plumbing, not caller options: they
+    carry a parent expansion's exposed-input values INTO a nested conversion,
+    and the node ids those values may legally reference from outside this
+    graph, so the dangling-wire cleanup cannot eat them.
     """
+    feeds = dict(_feeds or {})
+    external = set(_external or ())
     fmt = detect_format(ui)
     if fmt == "api":
         # SAME SHAPE as the conversion path. A caller reading
@@ -191,6 +521,7 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
             "missing_node_types": [],
             "missing": [],
             "subgraphs": [],
+            "subgraphs_expanded": [],
             "nodes_in": len(ui),
             "nodes_out": len(ui),
         }
@@ -201,7 +532,9 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
     nodes_by_id = {str(n.get("id")): n for n in nodes}
     links = link_map(ui)
     subgraphs = subgraph_defs(ui)
+    defs = subgraph_definitions(ui)
     api, dropped, warnings, missing, unsupported = {}, [], [], [], []
+    expanded, out_maps = [], {}
 
     for node in nodes:
         nid = str(node.get("id"))
@@ -234,7 +567,59 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
         if schema is None:
             # Collected, not raised: one run must name EVERY missing type, or
             # installing packs becomes a guessing game one node at a time.
-            if ctype in subgraphs:
+            if ctype in defs:
+                if _depth >= MAX_SUBGRAPH_DEPTH:
+                    unsupported.append(
+                        {
+                            "node": nid,
+                            "class_type": ctype,
+                            "name": subgraphs.get(ctype, ctype),
+                            "kind": "subgraph",
+                            "reason": f"nested more than {MAX_SUBGRAPH_DEPTH} deep",
+                        }
+                    )
+                else:
+                    try:
+                        frag, om, bits = _expand_instance(
+                            nid,
+                            node,
+                            defs,
+                            object_info,
+                            links,
+                            nodes_by_id,
+                            keep_muted,
+                            _depth,
+                            feeds,
+                            external,
+                        )
+                    except _ExpansionBlocked as exc:
+                        unsupported.append(
+                            {
+                                "node": nid,
+                                "class_type": ctype,
+                                "name": subgraphs.get(ctype, ctype),
+                                "kind": "subgraph",
+                                "reason": str(exc),
+                            }
+                        )
+                    else:
+                        api.update(frag)
+                        out_maps.update(om)
+                        warnings.extend(bits["warnings"])
+                        dropped.extend(bits["dropped"])
+                        missing.extend(bits["missing"])
+                        unsupported.extend(bits["unsupported"])
+                        expanded.append(bits["expanded"])
+                        dropped.append(
+                            {
+                                "node": nid,
+                                "class_type": ctype,
+                                "why": f"subgraph instance; expanded in place into "
+                                f"{len(frag)} node(s)",
+                            }
+                        )
+                        continue
+            elif ctype in subgraphs:
                 unsupported.append(
                     {"node": nid, "class_type": ctype, "name": subgraphs[ctype], "kind": "subgraph"}
                 )
@@ -308,11 +693,31 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
             entry["_meta"] = {"title": title}
         api[nid] = entry
 
+    # Rewire through expanded subgraphs. Every wire that pointed at an
+    # instance's exposed output now points at the inner node that produces the
+    # value; the fixpoint also settles chains of instance feeding instance.
+    for _ in range(MAX_SUBGRAPH_DEPTH + 1):
+        changed = False
+        for entry in api.values():
+            for name, val in (entry.get("inputs") or {}).items():
+                if isinstance(val, list) and len(val) == 2:
+                    hit = out_maps.get((str(val[0]), val[1]))
+                    if hit and hit != (str(val[0]), val[1]):
+                        entry["inputs"][name] = [hit[0], hit[1]]
+                        changed = True
+        if not changed:
+            break
+
     # A link pointing at a node that was dropped is a dangling edge.
     live = set(api)
     for nid, entry in api.items():
         for name, val in list(entry["inputs"].items()):
-            if isinstance(val, list) and len(val) == 2 and str(val[0]) not in live:
+            if (
+                isinstance(val, list)
+                and len(val) == 2
+                and str(val[0]) not in live
+                and str(val[0]) not in external
+            ):
                 warnings.append(
                     {
                         "node": nid,
@@ -329,6 +734,7 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
         "missing_node_types": sorted({m["class_type"] for m in missing}),
         "missing": missing,
         "subgraphs": unsupported,
+        "subgraphs_expanded": expanded,
         "nodes_in": len(nodes),
         "nodes_out": len(api),
     }
@@ -342,9 +748,10 @@ def to_api(ui, object_info, keep_muted=False, strict=True):
             lines.append("Install the packs that provide them — `workflow deps` lists them,")
             lines.append("and `nodes search <text>` shows what IS available.")
         if unsupported:
-            lines.append("This workflow uses SUBGRAPHS, which are not expanded yet:")
+            lines.append("These SUBGRAPHS could not be expanded:")
             for u in unsupported:
-                lines.append(f"  node {u['node']}: {u['name']}  ({u['class_type']})")
+                reason = f" — {u['reason']}" if u.get("reason") else ""
+                lines.append(f"  node {u['node']}: {u['name']}  ({u['class_type']}){reason}")
             lines.append("Open it in the canvas and use Convert to Nodes, or run it from the UI.")
         lines.append("Pass --no-strict to convert the rest anyway (the graph will be incomplete).")
         raise WorkflowError("\n".join(lines))

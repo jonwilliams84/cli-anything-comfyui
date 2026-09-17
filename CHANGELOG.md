@@ -2,6 +2,58 @@
 
 All notable changes to this project are documented here.
 
+## [0.17.0] — 2026-09-17
+
+Subgraph expansion — the first "not built yet" item from 0.1.0, finally built.
+A node whose `class_type` is a bare UUID is a **subgraph instance**: its body
+lives in the canvas under `definitions.subgraphs[]`, no server knows its name,
+and until now the harness named it and refused to convert. Every saved canvas
+that uses subgraphs was a dead end for `convert`, `deps` and `models` alike.
+
+- **`workflow convert` expands subgraphs in place.** The instance's body is
+  converted by the same recursive converter — bypasses, reroutes, the
+  `control_after_generate` off-by-one and further nesting all just apply —
+  then its nodes enter the API graph with ids `"<instance>:<inner>"` (`2:e`,
+  `2:b`, …), so two instances of one definition cannot collide and the server
+  accepts the opaque string ids verbatim (pinned by an E2E render). The
+  instance's exposed inputs are fed BY NAME: from the parent graph's wires
+  (resolved through bypasses/reroutes like any link) or from the instance's
+  promoted widget values (`widgets_values` positional against the definition's
+  `widgets` list, or a name-keyed dict, with the definition's own value as the
+  fallback). Consumers of the instance's outputs are rewired to the inner node
+  that produces the value by a fixpoint pass, which also settles
+  instance-feeds-instance chains. Boundary rows whose consumer is itself a
+  nested instance inject the value through the recursion, and node ids that
+  legally live one level up are exempt from the dangling-wire cleanup for
+  exactly that hop.
+- **Every pre-flight check now sees through subgraphs.** `workflow deps` names
+  the node TYPES a subgraph's body needs (missing types carry the prefixed id,
+  e.g. `2:x`, so you know WHICH instance is the hole); `workflow models` checks
+  the model FILES the body names; `workflow validate` checks its shape. The
+  conversion report gains `subgraphs_expanded` (which instances became how many
+  nodes); inner warnings and drops carry the instance prefix too.
+- **`workflow subgraphs PATH`** — read the definitions BEFORE conversion: name,
+  id, inner node/link counts, exposed inputs and outputs, promoted widgets,
+  which canvas nodes instantiate each definition, and whether it can be
+  expanded here (`expandable: NO — the definition carries no nodes`).
+- Still honest about the limits: a definition with no body, or nesting deeper
+  than 10 levels, stays unexpanded and is reported with the REASON instead of
+  being silently skipped or faked. Strict mode still refuses to produce an
+  incomplete graph.
+- 19 new unit tests in `test_core.py` (244 total, all passing; coverage 98%):
+  expansion wiring both directions, two instances without collision, widget
+  values by position/name/default, feeds resolved through a bypass,
+  instance→instance settling, recursive nesting, prefixed missing types and
+  warnings, the depth cap on a self-referential definition, the new command,
+  and the convert/deps CLI paths.
+- 4 new E2E tests in `test_full_e2e.py`: `workflow subgraphs` against a real
+  canvas, convert expansion the server ACCEPTS, `deps` reporting the
+  expansion, and a full render from an expanded subgraph whose download is
+  checked for PNG magic bytes.
+- Docs: README.md, cli_anything/comfyui/README.md, COMFYUI.md (a new SOP
+  subsection), TEST.md, and the REPL help. "Not built yet" loses its oldest
+  entry; `review` remains the last one.
+
 ## [0.16.0] — 2026-09-10
 
 The parameter sweep. Varying one input of one graph — a seed, a width, a

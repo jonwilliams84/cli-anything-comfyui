@@ -252,6 +252,428 @@ def test_a_subgraph_is_named_not_called_a_missing_pack():
         wf.to_api(g, OI, strict=True)
 
 
+def test_a_subgraph_with_no_body_is_reported_with_the_reason():
+    """A definition that only carries id+name cannot be expanded; the report
+    must say WHY instead of leaving a bare 'subgraph' entry to decode."""
+    uuid = "cf70afc4-5a03-47ce-8210-734b1de6c6bc"
+    g = ui(
+        [node(1, uuid, [])],
+        definitions={"subgraphs": [{"id": uuid, "name": "Empty Shell"}]},
+    )
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert rep["subgraphs"][0]["reason"] == "the definition carries no nodes"
+    with pytest.raises(wf.WorkflowError, match="could not be expanded"):
+        wf.to_api(g, OI, strict=True)
+
+
+# ---------------------------------------------------------------- subgraph expansion
+
+
+SUB_UUID = "11111111-2222-3333-4444-555555555555"
+
+
+def sub_def():
+    """A subgraph definition: a loader and a sampler behind one boundary.
+
+    Exposes the loader's MODEL and the sampler's seed; the exposed LATENT
+    output is what the sampler produces. The inner `seed` input is boundary-
+    wired (link 100 from the inputNode), which is how the frontend feeds a
+    promoted widget into the body.
+    """
+    return {
+        "id": SUB_UUID,
+        "name": "Seeded Two Step",
+        "inputNode": {
+            "id": "in",
+            "name": "Input",
+            "inputs": [
+                {"id": "i1", "name": "model", "type": "MODEL"},
+                {"id": "i2", "name": "seed", "type": "INT"},
+            ],
+        },
+        "outputNode": {
+            "id": "out",
+            "name": "Output",
+            "outputs": [{"id": "o1", "name": "LATENT", "type": "LATENT"}],
+        },
+        "widgets": [{"id": "w1", "name": "seed", "value": 1}],
+        "nodes": [
+            {
+                "id": "a",
+                "type": "CheckpointLoaderSimple",
+                "mode": 0,
+                "inputs": [],
+                "widgets_values": ["a.safetensors"],
+            },
+            {
+                "id": "b",
+                "type": "KSampler",
+                "mode": 0,
+                "inputs": [
+                    {"name": "seed", "link": 100},
+                    {"name": "model", "link": 101},
+                    {"name": "latent_image", "link": 102},
+                ],
+                "widgets_values": [7, "fixed", 3, 7.0, "euler", "simple", 1.0],
+            },
+        ],
+        "links": [
+            [100, "in", 1, "b", 0, "INT"],
+            [101, "in", 0, "b", 0, "MODEL"],
+            [102, "a", 0, "b", 3, "LATENT"],
+            [103, "b", 0, "out", 0, "LATENT"],
+        ],
+    }
+
+
+def instance(nid, widgets=(42,), extra_inputs=()):
+    """A subgraph instance node: type is the bare UUID, inputs carry the
+    exposed slots, widgets_values are positional against the definition."""
+    return {
+        "id": nid,
+        "type": SUB_UUID,
+        "mode": 0,
+        "inputs": [
+            {"name": "model", "link": 7},
+            {"name": "seed", "widget": {"name": "seed"}},
+            *extra_inputs,
+        ],
+        "outputs": [{"name": "LATENT", "links": [8]}],
+        "widgets_values": list(widgets),
+    }
+
+
+def subgraph_canvas(instances=None, extra_nodes=(), extra_links=()):
+    if instances is None:
+        instances = (instance(2),)  # built per call: no shared mutable default
+    nodes = [
+        node(4, "CheckpointLoaderSimple", ["b.safetensors"]),
+        *instances,
+        node(5, "VAEDecode", inputs=[{"name": "samples", "link": 8}]),
+        *extra_nodes,
+    ]
+    return ui(
+        nodes,
+        [[7, 4, 0, 2, 0, "MODEL"], [8, 2, 0, 5, 0, "LATENT"], *extra_links]
+        + ([[9, 5, 0, 6, 0, "IMAGE"]] if any(n.get("id") == 6 for n in extra_nodes) else []),
+        definitions={"subgraphs": [sub_def()]},
+    )
+
+
+def test_a_subgraph_instance_expands_into_its_inner_nodes():
+    api, rep = wf.to_api(subgraph_canvas(), OI)
+    assert set(api) == {"4", "2:a", "2:b", "5"}, "the instance is gone, its body is in"
+    sampler = api["2:b"]["inputs"]
+    assert sampler["model"] == ["4", 0], "exposed input wired to the parent's source"
+    assert sampler["seed"] == 42, "the instance's widget value, not the body's default"
+    assert sampler["latent_image"] == ["2:a", 0], "the body's own wiring survives"
+    assert sampler["steps"] == 3 and sampler["denoise"] == 1.0
+    assert rep["subgraphs_expanded"] == [
+        {"node": "2", "name": "Seeded Two Step", "nodes_out": 2, "nested": False}
+    ]
+    assert rep["subgraphs"] == [] and rep["missing_node_types"] == []
+    assert any("expanded in place" in d["why"] for d in rep["dropped"])
+
+
+def test_an_instance_output_rewires_the_outer_consumer():
+    api, _ = wf.to_api(subgraph_canvas(), OI)
+    assert api["5"]["inputs"]["samples"] == ["2:b", 0]
+
+
+def test_two_instances_of_one_subgraph_do_not_collide():
+    second = instance(8, widgets=(99,))
+    g = subgraph_canvas(
+        instances=(instance(2), second),
+        extra_nodes=[
+            node(6, "VAEDecode", inputs=[{"name": "samples", "link": 10}]),
+            node(7, "SaveImage", inputs=[{"name": "images", "link": 11}]),
+        ],
+        extra_links=[[10, 8, 0, 6, 0, "LATENT"], [11, 6, 0, 7, 0, "IMAGE"]],
+    )
+    api, rep = wf.to_api(g, OI)
+    assert {"2:a", "2:b", "8:a", "8:b"} <= set(api)
+    assert api["2:b"]["inputs"]["seed"] == 42
+    assert api["8:b"]["inputs"]["seed"] == 99, "each instance keeps its own widgets"
+    assert api["6"]["inputs"]["samples"] == ["8:b", 0]
+    assert [s["node"] for s in rep["subgraphs_expanded"]] == ["2", "8"]
+
+
+def test_the_instance_widget_value_can_arrive_by_name():
+    inst = instance(2, widgets=())
+    inst["widgets_values"] = {"seed": 1234}  # some packs serialise widgets by name
+    api, _ = wf.to_api(subgraph_canvas(instances=(inst,)), OI)
+    assert api["2:b"]["inputs"]["seed"] == 1234
+
+
+def test_an_unfed_exposed_widget_falls_back_to_the_definition_default():
+    inst = instance(2, widgets=())
+    inst["inputs"] = [{"name": "model", "link": 7}, {"name": "seed"}]
+    inst.pop("widgets_values")
+    api, _ = wf.to_api(subgraph_canvas(instances=(inst,)), OI)
+    assert api["2:b"]["inputs"]["seed"] == 1, "the definition's own widget value"
+
+
+def test_an_exposed_input_resolves_through_a_bypassed_node():
+    g = subgraph_canvas()
+    g["links"] = [[12, 4, 0, 9, 0, "MODEL"], [7, 9, 0, 2, 0, "MODEL"], [8, 2, 0, 5, 0, "LATENT"]]
+    g["nodes"].insert(
+        0,
+        node(
+            9,
+            "CheckpointLoaderSimple",
+            ["b.safetensors"],
+            inputs=[{"name": "x", "link": 12}],
+            mode=4,
+        ),
+    )
+    api, _ = wf.to_api(g, OI)
+    assert api["2:b"]["inputs"]["model"] == ["4", 0], "rewired past the bypass"
+
+
+def test_an_instance_feeding_another_instance_settles():
+    """Instance A's exposed output feeding instance B's exposed input — the
+    wire points at an instance that is itself gone, so the fixpoint pass must
+    land on the inner node that produces the value."""
+    src_uuid = "22222222-2222-3333-4444-555555555555"
+    src_def = {
+        "id": src_uuid,
+        "name": "Model Source",
+        "inputNode": {"id": "in", "name": "Input", "inputs": []},
+        "outputNode": {
+            "id": "out",
+            "name": "Output",
+            "outputs": [{"id": "o1", "name": "MODEL", "type": "MODEL"}],
+        },
+        "nodes": [
+            {
+                "id": "s",
+                "type": "CheckpointLoaderSimple",
+                "mode": 0,
+                "inputs": [],
+                "widgets_values": ["a.safetensors"],
+            }
+        ],
+        "links": [[110, "s", 0, "out", 0, "MODEL"]],
+    }
+    g = subgraph_canvas()
+    g["nodes"].append(
+        {
+            "id": 3,
+            "type": src_uuid,
+            "mode": 0,
+            "inputs": [],
+            "outputs": [{"name": "MODEL", "links": [7]}],
+            "widgets_values": [],
+        }
+    )
+    g["links"] = [[7, 3, 0, 2, 0, "MODEL"], [8, 2, 0, 5, 0, "LATENT"]]
+    g["definitions"]["subgraphs"].append(src_def)
+    api, _ = wf.to_api(g, OI)
+    assert api["2:b"]["inputs"]["model"] == ["3:s", 0]
+
+
+def test_nested_subgraphs_expand_recursively():
+    outer_uuid = "33333333-2222-3333-4444-555555555555"
+    outer_def = {
+        "id": outer_uuid,
+        "name": "Wrapper",
+        "inputNode": {
+            "id": "in",
+            "name": "Input",
+            "inputs": [{"id": "i1", "name": "model", "type": "MODEL"}],
+        },
+        "outputNode": {
+            "id": "out",
+            "name": "Output",
+            "outputs": [{"id": "o1", "name": "LATENT", "type": "LATENT"}],
+        },
+        "nodes": [
+            {
+                "id": "mid",
+                "type": SUB_UUID,
+                "mode": 0,
+                "inputs": [
+                    {"name": "model", "link": 200},
+                    {"name": "seed", "widget": {"name": "seed"}},
+                ],
+                "outputs": [{"name": "LATENT", "links": [201]}],
+                "widgets_values": [5],
+            }
+        ],
+        "links": [[200, "in", 0, "mid", 0, "MODEL"], [201, "mid", 0, "out", 0, "LATENT"]],
+        "definitions": {"subgraphs": [sub_def()]},
+    }
+    g = subgraph_canvas()
+    for n in g["nodes"]:
+        if n.get("id") == 2:
+            n["type"] = outer_uuid
+            n["inputs"] = [{"name": "model", "link": 7}]
+            n.pop("widgets_values")
+    g["definitions"]["subgraphs"] = [outer_def]
+    api, rep = wf.to_api(g, OI)
+    assert "2:mid:a" in api and "2:mid:b" in api
+    assert api["2:mid:b"]["inputs"]["model"] == ["4", 0]
+    assert api["2:mid:b"]["inputs"]["seed"] == 5, "the OUTER instance's widget value"
+    assert rep["subgraphs_expanded"][0]["nested"] is True
+
+
+def test_missing_types_inside_a_subgraph_are_reported_with_prefixed_ids():
+    d = sub_def()
+    d["nodes"].append(
+        {"id": "x", "type": "NotInstalledPack", "mode": 0, "inputs": [], "widgets_values": []}
+    )
+    g = subgraph_canvas()
+    g["definitions"]["subgraphs"] = [d]
+    api, rep = wf.to_api(g, OI, strict=False)
+    assert rep["missing_node_types"] == ["NotInstalledPack"]
+    assert rep["missing"][0]["node"] == "2:x", "the id names where the hole is"
+    with pytest.raises(wf.WorkflowError, match="NotInstalledPack"):
+        wf.to_api(g, OI, strict=True)
+
+
+def test_inner_warnings_and_drops_carry_the_instance_prefix():
+    d = sub_def()
+    d["nodes"].append(
+        {
+            "id": "x",
+            "type": "Reroute",
+            "mode": 0,
+            "inputs": [{"name": "", "link": 999}],
+            "widgets_values": [],
+        }
+    )
+    d["nodes"].append(
+        {
+            "id": "y",
+            "type": "VAEDecode",
+            "mode": 0,
+            "inputs": [{"name": "samples", "link": 999}],
+            "widgets_values": [],
+        }
+    )
+    g = subgraph_canvas()
+    g["definitions"]["subgraphs"] = [d]
+    _, rep = wf.to_api(g, OI, strict=False)
+    assert any(w["node"] == "2:y" for w in rep["warnings"]), "warnings say WHERE the hole is"
+    assert any(dd["node"] == "2:x" for dd in rep["dropped"])
+
+
+def test_a_self_referential_subgraph_hits_the_depth_cap_instead_of_hanging():
+    d = sub_def()
+    d["nodes"].append(
+        {"id": "me", "type": SUB_UUID, "mode": 0, "inputs": [], "outputs": [], "widgets_values": []}
+    )
+    d["definitions"] = {"subgraphs": [d]}  # the definition contains itself
+    g = subgraph_canvas()
+    g["definitions"]["subgraphs"] = [d]
+    _, rep = wf.to_api(g, OI, strict=False)
+    assert any("nested more than" in (s.get("reason") or "") for s in rep["subgraphs"])
+
+
+def test_subgraph_inventory_describes_the_definitions():
+    inv = wf.subgraph_inventory(subgraph_canvas())
+    assert len(inv) == 1
+    s = inv[0]
+    assert s["name"] == "Seeded Two Step" and s["expandable"] is True
+    assert s["instances"] == ["2"] and s["nodes"] == 2 and s["links"] == 4
+    assert [i["name"] for i in s["inputs"]] == ["model", "seed"]
+    assert [o["name"] for o in s["outputs"]] == ["LATENT"]
+    assert [w["name"] for w in s["widgets"]] == ["seed"]
+    empty = wf.subgraph_inventory(
+        ui([node(1, SUB_UUID, [])], definitions={"subgraphs": [{"id": SUB_UUID, "name": "E"}]})
+    )
+    assert empty[0]["expandable"] is False and "no nodes" in empty[0]["why_not"]
+
+
+def test_the_already_api_report_carries_the_expansion_key():
+    api_in = {"1": {"class_type": "KSampler", "inputs": {}}}
+    _, rep = wf.to_api(api_in, OI)
+    assert rep["subgraphs_expanded"] == []
+
+
+# --------------------------------------------------- subgraph expansion via the CLI
+
+
+def test_workflow_convert_expands_a_subgraph(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    canvas = tmp_path / "sg.json"
+    canvas.write_text(json.dumps(subgraph_canvas()), encoding="utf-8")
+    out = str(tmp_path / "api.json")
+    human = runner.invoke(
+        cl.cli,
+        ["--session", str(tmp_path / "s.json"), "workflow", "convert", str(canvas), "-o", out],
+    )
+    assert human.exit_code == 0, human.output
+    assert "expanded subgraph Seeded Two Step (node 2) -> 2 nodes" in human.output
+    with open(out, encoding="utf-8") as fh:
+        api = json.load(fh)
+    assert "2:b" in api and api["2:b"]["inputs"]["model"] == ["4", 0]
+
+
+def test_workflow_deps_sees_through_a_subgraph(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    d = sub_def()
+    d["nodes"].append(
+        {"id": "x", "type": "NotInstalledPack", "mode": 0, "inputs": [], "widgets_values": []}
+    )
+    g = subgraph_canvas()
+    g["definitions"]["subgraphs"] = [d]
+    canvas = tmp_path / "sg.json"
+    canvas.write_text(json.dumps(g), encoding="utf-8")
+    payload = json.loads(runner.invoke(cl.cli, ["--json", "workflow", "deps", str(canvas)]).output)
+    assert payload["missing_node_types"] == ["NotInstalledPack"]
+    assert payload["subgraphs_expanded"][0]["name"] == "Seeded Two Step"
+    assert payload["satisfied"] is False
+    human = runner.invoke(cl.cli, ["workflow", "deps", str(canvas)])
+    assert human.exit_code == 0
+    assert "NotInstalledPack" in human.output
+    assert "subgraph (expanded): Seeded Two Step -> 2 node(s)" in human.output
+
+
+def test_workflow_deps_still_names_an_unexpandable_subgraph(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    sg = tmp_path / "sg.json"
+    uid = "11111111-2222-3333-4444-555555555555"
+    sg.write_text(
+        json.dumps(
+            {
+                "nodes": [node(1, uid)],
+                "links": [],
+                "definitions": {"subgraphs": [{"id": uid, "name": "my loop"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    human = runner.invoke(cl.cli, ["workflow", "deps", str(sg)])
+    assert human.exit_code == 0 and "subgraph (not expanded): my loop" in human.output
+
+
+def test_workflow_subgraphs_lists_the_definitions(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    canvas = tmp_path / "sg.json"
+    canvas.write_text(json.dumps(subgraph_canvas()), encoding="utf-8")
+    payload = json.loads(
+        runner.invoke(cl.cli, ["--json", "workflow", "subgraphs", str(canvas)]).output
+    )
+    assert payload["count"] == 1
+    s = payload["subgraphs"][0]
+    assert s["name"] == "Seeded Two Step" and s["instances"] == ["2"]
+    assert s["expandable"] is True
+    human = runner.invoke(cl.cli, ["workflow", "subgraphs", str(canvas)])
+    assert human.exit_code == 0, human.output
+    assert "Seeded Two Step" in human.output and "expandable: yes" in human.output
+    assert "inputs: model (MODEL), seed (INT)" in human.output
+
+
+def test_workflow_subgraphs_refuses_a_missing_file():
+    res = runner.invoke(cl.cli, ["workflow", "subgraphs", "/no/such/canvas.json"])
+    assert res.exit_code != 0 and "no such workflow" in res.output
+
+
 def test_a_wire_to_a_dropped_node_is_removed_and_warned_about():
     g = ui(
         [
@@ -728,7 +1150,7 @@ def _seed_session(path, graph):
 
 
 def test_the_cli_reports_its_version():
-    assert "0.16.0" in runner.invoke(cl.cli, ["--version"]).output
+    assert "0.17.0" in runner.invoke(cl.cli, ["--version"]).output
 
 
 def test_traps_list_and_one_in_full():

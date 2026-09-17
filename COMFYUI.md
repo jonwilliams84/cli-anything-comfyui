@@ -79,10 +79,11 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
     server     status / features / embeddings / free / interrupt / logs
     nodes      list, search, schema, categories — the 1805 types and what each
                input is called, discoverable by category prefix
-    workflow   convert (UI→API), validate, info, outputs, deps, models (the
-               model FILES a graph names, checked against the server's own
-               /models listings), get/set/unset a node input, export the
-               patched graph, diff it against a file
+    workflow   convert (UI→API, with subgraph expansion), validate, info,
+               outputs, deps, subgraphs (what each subgraph definition
+               contains), models (the model FILES a graph names, checked
+               against the server's own /models listings), get/set/unset a
+               node input, export the patched graph, diff it against a file
     run        submit a graph and wait, with progress
     sweep      run ONE graph many times, varying named inputs (--param
                NODE.INPUT=v1,v2 zipped, --cross for the cartesian product,
@@ -165,3 +166,40 @@ session's — is never modified. The failure conventions are `run_windows`'s: a
 failed variant does not abort the rest, VRAM is freed between variants
 (`--keep-vram` opts out), and the summary reports `succeeded`/`failed` with
 exit 1 if anything failed, so `sweep … && merge-the-outputs` chains stop.
+
+### Subgraphs: the format that used to be refused
+
+The canvas format grew subgraphs: a node whose `type` is a bare UUID is an
+INSTANCE, and its body lives in the same file under `definitions.subgraphs[]`
+with two boundary markers — an `inputNode` whose `inputs[]` are the slots the
+instance exposes, and an `outputNode` whose `outputs[]` name what each exposed
+output IS. Nothing on the server knows these names; until v0.17 the harness
+named the instance and refused to convert it, which made every saved canvas
+that uses subgraphs a dead end for `convert`, `deps` and `models` alike.
+
+Expansion happens inside `to_api`, in place, so every downstream surface sees
+through the boundary with no new code paths:
+
+- The body is converted by the same recursive `to_api` — bypasses, reroutes,
+  the `control_after_generate` off-by-one and further nesting all just apply.
+- Inner ids are prefixed `"<instance>:<inner>"` (`2:e`, `2:b`, …), so two
+  instances of one definition cannot collide, and the server accepts the
+  opaque string ids verbatim (pinned by an E2E render).
+- The instance's exposed inputs are fed BY NAME: a parent wire (resolved
+  through bypasses/reroutes like any other link) or a promoted widget's value
+  from the instance's `widgets_values` (positional against the definition's
+  `widgets` list, or a name-keyed dict). Boundary rows whose consumer is
+  itself a nested instance inject the value through the recursion, and node
+  ids that legally live outside the inner graph are exempted from the
+  dangling-wire cleanup for exactly that hop.
+- Consumers of the instance's outputs are rewired to the inner origin by a
+  fixpoint pass, which is also what settles instance-feeds-instance chains.
+- The report gains `subgraphs_expanded` (which instances became how many
+  nodes); inner warnings, drops and missing types carry the prefixed node id,
+  so `workflow deps` names the packs a subgraph's BODY needs. A definition
+  with no body, or nesting deeper than `MAX_SUBGRAPH_DEPTH` (10), stays
+  unexpanded with the reason in `report["subgraphs"]`.
+
+`workflow subgraphs PATH` reads the definitions before any conversion:
+name, id, inner node/link counts, exposed inputs/outputs, promoted widgets,
+which canvas nodes instantiate it, and whether it can be expanded here.
