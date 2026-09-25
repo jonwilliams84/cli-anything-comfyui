@@ -203,7 +203,7 @@ class TestCLISubprocess:
         assert "ComfyUI" in self._run(["--help"]).stdout
 
     def test_version(self):
-        assert "0.17.0" in self._run(["--version"]).stdout
+        assert "0.18.0" in self._run(["--version"]).stdout
 
     def test_server_status_json(self):
         d = json.loads(self._run(["--json", "server", "status"]).stdout)
@@ -811,3 +811,81 @@ class TestCLISubgraphSubprocess:
         with open(files[0]["path"], "rb") as fh:
             assert fh.read(8) == b"\x89PNG\r\n\x1a\n"
         print(f"\n  subprocess subgraph render: {files[0]['path']} ({files[0]['bytes']:,} bytes)")
+
+
+class TestCLIGraphEditing:
+    """Building and repairing a graph through the CLI only — no canvas file.
+
+    `workflow add-node` defaults against the LIVE /object_info, so what it
+    fills and what it demands is whatever THIS server actually declares.
+    """
+
+    def _build_render_graph(self, tmp_path):
+        """EmptyImage -> SaveImage, built entirely from add-node and wire."""
+        sess = str(tmp_path / "s.json")
+        a = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "add-node", "EmptyImage"]).stdout
+        )
+        assert a["node"] == "1" and a["needs_wiring"] == [], "EmptyImage is widgets only"
+        b = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "add-node", "SaveImage"]).stdout
+        )
+        assert b["node"] == "2" and b["needs_wiring"] == ["images"]
+        self._run(["--json", "--session", sess, "workflow", "wire", "1", "2.images"])
+        v = json.loads(self._run(["--json", "--session", sess, "workflow", "validate"]).stdout)
+        assert v["ok"], v["problems"]
+        return sess
+
+    def test_a_graph_built_from_the_cli_renders(self, tmp_path):
+        sess = self._build_render_graph(tmp_path)
+        dl = str(tmp_path / "out")
+        r = json.loads(self._run(["--json", "--session", sess, "run", "--download", dl]).stdout)
+        assert r["output_count"] > 0
+        files = [f for f in r["download"]["files"] if f["ok"]]
+        assert files, "the built graph queued, ran and produced nothing"
+        with open(files[0]["path"], "rb") as fh:
+            assert fh.read(8) == b"\x89PNG\r\n\x1a\n"
+        print(f"\n  built-from-CLI render: {files[0]['path']} ({files[0]['bytes']:,} bytes)")
+
+    def test_add_node_demands_exactly_what_the_live_schema_demands(self, tmp_path):
+        """needs_wiring and validate's missing-required list agree on the real
+        server — the whole point of defaulting against /object_info."""
+        sess = str(tmp_path / "s.json")
+        self._run(["--json", "--session", sess, "workflow", "add-node", "KSampler"])
+        a = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "add-node", "KSampler"]).stdout
+        )
+        link_inputs = []
+        oi = object_info["KSampler"]["input"]["required"]
+        for name, spec in oi.items():
+            t = spec[0] if isinstance(spec, list) else None
+            if isinstance(t, list):
+                continue  # a combo is a widget
+            if isinstance(spec, (list, tuple)) and len(spec) > 1 and isinstance(spec[1], dict):
+                if spec[1].get("forceInput"):
+                    continue
+            if t not in ("INT", "FLOAT", "STRING", "BOOLEAN"):
+                link_inputs.append(name)
+        assert a["needs_wiring"] == link_inputs
+        v = json.loads(self._run(["--json", "--session", sess, "workflow", "validate"]).stdout)
+        assert {p["input"] for p in v["problems"]} == set(a["needs_wiring"])
+
+    def test_wire_catches_a_mismatch_the_server_would_reject(self, tmp_path):
+        """An IMAGE wired into a STRING widget input is refused HERE, not by
+        the server seconds into a queued render."""
+        sess = self._build_render_graph(tmp_path)
+        self._run(["--json", "--session", sess, "workflow", "add-node", "SaveImage"])
+        r = self._run(
+            ["--json", "--session", sess, "workflow", "wire", "1", "3.filename_prefix"],
+            check=False,
+        )
+        assert r.returncode == 1 and ("type mismatch" in r.stdout or "type mismatch" in r.stderr)
+
+    def test_remove_node_drops_its_wires_on_the_live_graph(self, tmp_path):
+        sess = self._build_render_graph(tmp_path)
+        d = json.loads(
+            self._run(["--json", "--session", sess, "workflow", "remove-node", "1"]).stdout
+        )
+        assert d["removed"] == "1" and d["wires_cleared"] == ["2.images"]
+        v = json.loads(self._run(["--json", "--session", sess, "workflow", "validate"]).stdout)
+        assert {p["input"] for p in v["problems"]} == {"images"}, "the hole validate sees"

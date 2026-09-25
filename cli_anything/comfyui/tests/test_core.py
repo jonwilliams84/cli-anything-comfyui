@@ -1150,7 +1150,7 @@ def _seed_session(path, graph):
 
 
 def test_the_cli_reports_its_version():
-    assert "0.17.0" in runner.invoke(cl.cli, ["--version"]).output
+    assert "0.18.0" in runner.invoke(cl.cli, ["--version"]).output
 
 
 def test_traps_list_and_one_in_full():
@@ -3789,3 +3789,367 @@ def test_sweep_on_a_bad_patch_fails_that_variant_and_exits_1(tmp_path, monkeypat
     d = json.loads(r.output)
     assert d["failed"] == 2 and "no node 99" in d["results"][0]["error"]
     assert fake.submitted == [], "nothing was queued"
+
+
+# --------------------- v0.18.0: building and repairing graphs (add-node / remove-node / wire)
+
+
+#: object_info extended the way a real server reports OUTPUT types, which the
+#: type check in `wire_input` reads. The base OI above carries only inputs.
+WIRE_OI = {
+    **OI,
+    "CheckpointLoaderSimple": {
+        "output": ["MODEL", "CLIP", "VAE"],
+        "input": {"required": {"ckpt_name": [["a.safetensors", "b.safetensors"]]}},
+    },
+    "VAEDecode": {
+        "output": ["IMAGE"],
+        "input": {"required": {"samples": ["LATENT"], "vae": ["VAE"]}},
+    },
+    "Reroute": {"output": ["*"], "input": {"required": {"": ["*"]}}},
+    "ForceInput": {
+        "input": {"required": {"text": ["STRING", {"default": "", "forceInput": True}]}},
+    },
+    "NoDefaultInt": {"input": {"required": {"count": ["INT"]}}},
+}
+
+
+def test_next_node_id_picks_the_lowest_free_id():
+    assert wf.next_node_id({}) == "1"
+    assert wf.next_node_id({"1": {}, "2": {}}) == "3"
+    assert wf.next_node_id({"1": {}, "4": {}}) == "2", "gaps are filled, not just appended"
+
+
+def test_next_node_id_ignores_non_numeric_ids():
+    assert wf.next_node_id({"2:e": {}, "9": {}}) == "1", "subgraph ids never compete"
+
+
+def test_add_node_fills_widget_defaults_and_lists_link_inputs():
+    api = {}
+    res = wf.add_node(api, "KSampler", OI)
+    assert res["node"] == "1" and api["1"]["class_type"] == "KSampler"
+    assert api["1"]["inputs"] == {
+        "seed": 0,
+        "steps": 20,
+        "cfg": 8.0,
+        "sampler_name": "euler",
+        "scheduler": "normal",
+        "denoise": 1.0,
+    }
+    assert res["needs_wiring"] == ["model", "positive", "negative", "latent_image"]
+    assert "control_after_generate" not in api["1"]["inputs"], "the phantom companion is UI-only"
+
+
+def test_add_node_combo_takes_its_first_choice():
+    res = wf.add_node({}, "SaveImage", OI)
+    assert res["inputs"]["filename_prefix"] == "ComfyUI"
+    res = wf.add_node({}, "CheckpointLoaderSimple", OI)
+    assert res["inputs"]["ckpt_name"] == "a.safetensors"
+
+
+def test_add_node_treats_forceInput_as_wiring():
+    res = wf.add_node({}, "ForceInput", WIRE_OI)
+    assert res["inputs"] == {} and res["needs_wiring"] == ["text"]
+
+
+def test_add_node_does_not_invent_a_default_the_schema_lacks():
+    res = wf.add_node({}, "NoDefaultInt", WIRE_OI)
+    assert res["inputs"] == {} and res["needs_wiring"] == ["count"]
+
+
+def test_add_node_uses_the_id_you_give_and_refuses_a_taken_one():
+    api = {"1": {"class_type": "KSampler", "inputs": {}}}
+    assert wf.add_node(api, "SaveImage", OI, node_id=9)["node"] == "9"
+    assert "9" in api
+    with pytest.raises(wf.WorkflowError, match="already taken"):
+        wf.add_node(api, "SaveImage", OI, node_id=1)
+
+
+def test_add_node_names_an_uninstalled_type():
+    with pytest.raises(wf.WorkflowError, match="not installed"):
+        wf.add_node({}, "NoSuchPack.Node", OI)
+
+
+def test_add_node_carries_the_title_into__meta():
+    res = wf.add_node({}, "SaveImage", OI, title="the saver")
+    assert res["inputs"]  # defaults still filled
+    # title lands on the node in the graph, not just the payload:
+    api = {}
+    wf.add_node(api, "SaveImage", OI, title="the saver")
+    assert api["1"]["_meta"] == {"title": "the saver"}
+
+
+def test_remove_node_clears_the_wires_that_pointed_at_it():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}},
+        "2": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "steps": 4}},
+        "4": {"class_type": "Reroute", "inputs": {"": ["1", 2]}},
+    }
+    res = wf.remove_node(api, "1")
+    assert "1" not in api
+    assert res["class_type"] == "CheckpointLoaderSimple"
+    assert res["wires_cleared"] == ["2.model", "4."], "every consumer's link is cleared"
+    assert "model" not in api["2"]["inputs"]
+    assert api["2"]["inputs"]["steps"] == 4, "widget values are untouched"
+
+
+def test_remove_node_leaves_values_that_name_a_live_node_alone():
+    api = {
+        "1": {"class_type": "A", "inputs": {}},
+        "2": {"class_type": "B", "inputs": {"x": ["1", 0], "y": ["5", 0]}},
+        "5": {"class_type": "C", "inputs": {}},
+    }
+    res = wf.remove_node(api, "1")
+    assert res["wires_cleared"] == ["2.x"]
+    assert api["2"]["inputs"]["y"] == ["5", 0]
+
+
+def test_remove_node_on_a_missing_node_names_what_exists():
+    with pytest.raises(wf.WorkflowError, match="no node 7"):
+        wf.remove_node({"1": {}, "2": {}}, "7")
+
+
+def test_wire_sets_the_link_value_and_reports_both_types():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}},
+        "2": {"class_type": "KSampler", "inputs": {"seed": 0}},
+    }
+    res = wf.wire_input(api, "1", "2", "model", slot=0, object_info=WIRE_OI)
+    assert api["2"]["inputs"]["model"] == ["1", 0]
+    assert res["from_type"] == "MODEL" and res["input_type"] == "MODEL"
+    # slot 1 of a checkpoint loader is CLIP; re-wiring it over MODEL needs --force
+    res = wf.wire_input(api, "1", "2", "model", slot=1, object_info=WIRE_OI, force=True)
+    assert api["2"]["inputs"]["model"] == ["1", 1], "re-wiring overwrites the slot"
+
+
+def test_wire_catches_a_slot_that_does_not_exist():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+        "2": {"class_type": "KSampler", "inputs": {}},
+    }
+    with pytest.raises(wf.WorkflowError, match="slot 3 does not exist"):
+        wf.wire_input(api, "1", "2", "model", slot=3, object_info=WIRE_OI)
+
+
+def test_wire_catches_a_typo_in_the_input_name():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+        "2": {"class_type": "KSampler", "inputs": {}},
+    }
+    with pytest.raises(wf.WorkflowError, match="no input 'mdel'"):
+        wf.wire_input(api, "1", "2", "mdel", object_info=WIRE_OI)
+
+
+def test_wire_catches_a_type_mismatch_and_force_overrides():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+        "2": {"class_type": "VAEDecode", "inputs": {}},
+    }
+    with pytest.raises(wf.WorkflowError, match="MODEL.*VAE"):
+        wf.wire_input(api, "1", "2", "vae", slot=0, object_info=WIRE_OI)
+    res = wf.wire_input(api, "1", "2", "vae", slot=2, object_info=WIRE_OI)
+    assert res["from_type"] == "VAE" and api["2"]["inputs"]["vae"] == ["1", 2]
+
+
+def test_wire_refuses_to_feed_a_combo_input():
+    api = {
+        "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+        "2": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+    }
+    with pytest.raises(wf.WorkflowError, match="widget \\(combo\\)"):
+        wf.wire_input(api, "1", "2", "ckpt_name", object_info=WIRE_OI)
+    wf.wire_input(api, "1", "2", "ckpt_name", object_info=WIRE_OI, force=True)
+    assert api["2"]["inputs"]["ckpt_name"] == ["1", 0]
+
+
+def test_wire_goes_through_unchecked_when_a_schema_is_unknown():
+    api = {
+        "1": {"class_type": "SomePack.Loader", "inputs": {}},
+        "2": {"class_type": "OtherPack.User", "inputs": {}},
+    }
+    res = wf.wire_input(api, "1", "2", "anything", object_info=WIRE_OI)
+    assert res["from_type"] is None and res["input_type"] is None
+    assert api["2"]["inputs"]["anything"] == ["1", 0]
+
+
+def test_wire_refuses_a_node_wired_to_itself():
+    with pytest.raises(wf.WorkflowError, match="to itself"):
+        wf.wire_input({"1": {"class_type": "X", "inputs": {}}}, "1", "1", "x")
+
+
+def test_wire_allows_the_any_type():
+    api = {
+        "1": {"class_type": "Reroute", "inputs": {"": ["2", 0]}},
+        "2": {"class_type": "KSampler", "inputs": {}},
+    }
+    res = wf.wire_input(api, "1", "2", "model", object_info=WIRE_OI)
+    assert res["from_type"] == "*" and api["2"]["inputs"]["model"] == ["1", 0]
+
+
+def test_an_added_node_is_exactly_the_hole_validate_sees():
+    api = {
+        "2": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "a.safetensors"},
+        }
+    }
+    res = wf.add_node(api, "VAEDecode", WIRE_OI)
+    problems = wf.validate(api, WIRE_OI)["problems"]
+    assert {p["input"] for p in problems} == {"samples", "vae"}, "needs_wiring == validate's gaps"
+    wf.wire_input(api, "2", res["node"], "samples", slot=0, object_info=WIRE_OI, force=True)
+    wf.wire_input(api, "2", res["node"], "vae", slot=2, object_info=WIRE_OI)
+    assert wf.validate(api, WIRE_OI)["ok"]
+
+
+def test_workflow_add_node_defaults_from_the_server_schema_and_saves(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "EmptyLatent", "inputs": {}}})
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "--session", str(p), "workflow", "add-node", "KSampler"]
+        ).output
+    )
+    assert d["node"] == "2"
+    assert d["inputs"]["steps"] == 20
+    assert d["needs_wiring"] == ["model", "positive", "negative", "latent_image"]
+    assert d["session"]["saved"] is True
+    saved = sess.load(str(p))["workflow"]
+    assert saved["2"]["class_type"] == "KSampler"
+
+
+def test_workflow_add_node_dry_run_does_not_save(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "A", "inputs": {}}})
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "--dry-run", "--session", str(p), "workflow", "add-node", "SaveImage"],
+        ).output
+    )
+    assert d["session"]["dry_run"] is True
+    assert "2" not in sess.load(str(p))["workflow"]
+
+
+def test_workflow_add_node_without_a_loaded_workflow_dies():
+    r = runner.invoke(cl.cli, ["--json", "workflow", "add-node", "KSampler"])
+    assert r.exit_code == 1 and "no workflow loaded" in r.output
+
+
+def test_workflow_add_node_names_an_uninstalled_type_and_exits_1(monkeypatch, tmp_path):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "A", "inputs": {}}})
+    r = runner.invoke(
+        cl.cli, ["--json", "--session", str(p), "workflow", "add-node", "NoSuchPack.Node"]
+    )
+    assert r.exit_code == 1 and "not installed" in r.output
+
+
+def test_workflow_remove_node_clears_wires_in_the_session(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(
+        tmp_path / "s.json",
+        {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}},
+            "2": {"class_type": "KSampler", "inputs": {"model": ["1", 0], "steps": 4}},
+        },
+    )
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "--session", str(p), "workflow", "remove-node", "1"]
+        ).output
+    )
+    assert d["removed"] == "1" and d["wires_cleared"] == ["2.model"]
+    saved = sess.load(str(p))["workflow"]
+    assert "1" not in saved and "model" not in saved["2"]["inputs"]
+
+
+def test_workflow_remove_node_exits_1_on_an_unknown_node(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(tmp_path / "s.json", {"1": {"class_type": "A", "inputs": {}}})
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "remove-node", "7"])
+    assert r.exit_code == 1 and "no node 7" in r.output
+
+
+def test_workflow_wire_writes_the_link_into_the_session(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(fake, "object_info", lambda: WIRE_OI, raising=False)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(
+        tmp_path / "s.json",
+        {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "2": {"class_type": "KSampler", "inputs": {}},
+        },
+    )
+    d = json.loads(
+        runner.invoke(
+            cl.cli, ["--json", "--session", str(p), "workflow", "wire", "1", "2.model"]
+        ).output
+    )
+    assert d["from"] == "1" and d["node"] == "2" and d["input"] == "model"
+    assert sess.load(str(p))["workflow"]["2"]["inputs"]["model"] == ["1", 0]
+
+
+def test_workflow_wire_checks_types_against_the_server_schema(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(fake, "object_info", lambda: WIRE_OI, raising=False)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(
+        tmp_path / "s.json",
+        {
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {}},
+            "2": {"class_type": "VAEDecode", "inputs": {}},
+        },
+    )
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "wire", "1", "2.vae"])
+    assert r.exit_code == 1 and "type mismatch" in r.output
+    d = json.loads(
+        runner.invoke(
+            cl.cli,
+            ["--json", "--session", str(p), "workflow", "wire", "1", "2.vae", "--force"],
+        ).output
+    )
+    assert d["from_type"] == "MODEL"
+
+
+def test_workflow_wire_refuses_a_bare_destination(tmp_path, monkeypatch):
+    fake = FakeServer()
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(
+        tmp_path / "s.json",
+        {"1": {"class_type": "A", "inputs": {}}, "2": {"class_type": "B", "inputs": {}}},
+    )
+    r = runner.invoke(cl.cli, ["--json", "--session", str(p), "workflow", "wire", "1", "2model"])
+    assert r.exit_code == 1 and "NODE.INPUT" in r.output
+
+
+def test_add_node_wire_validate_compose_through_the_cli(tmp_path, monkeypatch):
+    """The building loop end to end: add, wire, validate — without a canvas."""
+    fake = FakeServer()
+    monkeypatch.setattr(fake, "object_info", lambda: WIRE_OI, raising=False)
+    monkeypatch.setattr(cl, "ComfyUI", lambda **kw: fake)
+    p = _seed_session(
+        tmp_path / "s.json",
+        {"9": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "a.safetensors"}}},
+    )
+
+    def args(*a):
+        return runner.invoke(cl.cli, ["--json", "--session", str(p), *a])
+
+    assert json.loads(args("workflow", "add-node", "VAEDecode").output)["node"] == "1"
+    v = json.loads(args("workflow", "validate").output)
+    assert v["ok"] is False, "a fresh node must not pretend to be complete"
+    r = args("workflow", "wire", "7", "1.samples")
+    assert r.exit_code == 1, "wiring from a node that does not exist fails loudly"
+    d = json.loads(args("workflow", "wire", "9", "1.samples", "--force").output)
+    assert d["from_type"] == "MODEL", "forced past the known mismatch"
+    assert (
+        json.loads(args("workflow", "wire", "9", "1.vae", "--slot", "2").output)["input_type"]
+        == "VAE"
+    )
+    assert json.loads(args("workflow", "validate").output)["ok"] is True

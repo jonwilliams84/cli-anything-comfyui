@@ -83,7 +83,9 @@ lines in which **66 re-implement `queue_prompt`, 62 re-implement history polling
                outputs, deps, subgraphs (what each subgraph definition
                contains), models (the model FILES a graph names, checked
                against the server's own /models listings), get/set/unset a
-               node input, export the patched graph, diff it against a file
+               node input, add-node/remove-node/wire (build and repair a
+               graph structurally — see the section below), export the
+               patched graph, diff it against a file
     run        submit a graph and wait, with progress
     sweep      run ONE graph many times, varying named inputs (--param
                NODE.INPUT=v1,v2 zipped, --cross for the cartesian product,
@@ -203,3 +205,49 @@ through the boundary with no new code paths:
 `workflow subgraphs PATH` reads the definitions before any conversion:
 name, id, inner node/link counts, exposed inputs/outputs, promoted widgets,
 which canvas nodes instantiate it, and whether it can be expanded here.
+
+### Building and repairing a graph: `add-node` / `remove-node` / `wire`
+
+Until v0.18 the harness could only PATCH inputs on nodes that already existed
+(`workflow set`); the moment a graph needed a node ADDED — extend a render with
+a video combine, swap in a different sampler chain, repair a canvas whose loader
+died — the answer was "open the canvas GUI". That was the last thing the CLI
+could not do that the software can. Three commands close it, all operating on
+the loaded session graph and auto-saving like `set`/`unset` do:
+
+- **`workflow add-node CLASS_TYPE`** creates a node whose widget inputs (COMBO
+  and scalar) are defaulted from the LIVE `/object_info` — the same source the
+  converter trusts for names and order, so the defaults are the ones THIS
+  server's pack versions declare, not a hardcoded table. A STRING widget with
+  `forceInput`, and any widget the schema gives no default for, are not
+  invented; they come back in `needs_wiring` — which is exactly the list
+  `workflow validate` reports as missing required inputs, so the gap is
+  checkable, never silent. The phantom `control_after_generate` companion is
+  UI-only and never emitted. `--id` picks the id (`add_node` otherwise takes
+  the lowest free integer, deterministic and collision-free against the string
+  ids subgraph expansion produces); `--title` becomes `_meta.title`.
+- **`workflow wire FROM TO.INPUT`** (e.g. `wire 4 9.model`, `--slot N` for
+  non-zero output slots) writes the link value `[from_id, slot]` — the same
+  shape `workflow set` writes by hand, but with the checks a bare set cannot
+  make, against the server's own schema when both ends are known: the slot
+  must exist on the source, the input must exist on the target (a typo is
+  caught here, not by the server), and the types must match — a MODEL wired
+  into a CONDITIONING input queues clean and dies seconds into execution,
+  which is precisely the failure class the harness's pre-flight exists to
+  catch. `--force` overrides a KNOWN mismatch; when either node's schema is
+  not installed the wire goes through UNCHECKED, because guessing a type is
+  how false alarms are made. Wiring into a combo input is refused (it is a
+  widget — `workflow set` its value instead), and a node cannot be wired to
+  itself.
+- **`workflow remove-node N`** deletes the node AND every wire pointing at it,
+  using the same link shape `validate` uses (a two-element list whose first
+  element names the node). Deleting a loader that feeds four consumers without
+  clearing their links leaves a graph that dies at the server with 'wired to
+  node N, which is not in the graph'; here the dangling wires are cleared in
+  the same step, and what remains is a graph whose holes `validate` reports as
+  missing inputs.
+
+The three compose with everything downstream: `add-node` → `wire` → `workflow
+validate` → `run --download` builds and renders a graph that never existed as
+a canvas (pinned by an E2E test that does exactly that), and every pre-flight
+check treats the result like any other graph.

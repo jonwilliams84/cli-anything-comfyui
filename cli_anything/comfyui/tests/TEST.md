@@ -12,8 +12,8 @@ RTX 3090, reachable from WSL at `127.0.0.1:8188`, 1805 node types installed.
 
 ## Inventory plan
 
-- `test_core.py` — 244 unit tests, synthetic graphs and a fake client, no server
-- `test_full_e2e.py` — ~40 tests against the real server, including subprocess
+- `test_core.py` — 275 unit tests, synthetic graphs and a fake client, no server
+- `test_full_e2e.py` — 43 tests against the real server, including subprocess
 
 ## Unit test plan (`test_core.py`)
 
@@ -599,3 +599,41 @@ conversion instead of refused.
   prefixed ids, `deps` reporting the expansion, and a full render from the
   expanded graph whose downloaded file is checked for PNG magic bytes.
 - Version pins updated 0.16.0 → 0.17.0 in both test files.
+
+## 2026-09-25 — v0.18.0: building and repairing graphs (`add-node` / `remove-node` / `wire`)
+
+The last thing the CLI still needed the canvas GUI for: adding, wiring and
+removing NODES. Until now the harness could only patch inputs on nodes that
+already existed.
+
+- New core functions in `core/workflow.py`: `next_node_id` (lowest free
+  integer, deterministic against the string ids subgraph expansion produces),
+  `add_node` (widget inputs defaulted from the LIVE `/object_info`; link-type
+  inputs — and STRING widgets with `forceInput`, and widgets the schema gives
+  no default for — reported as `needs_wiring` rather than invented),
+  `remove_node` (deletes the node and every wire pointing at it, using the
+  same two-element-list link shape `validate` uses), and `wire_input` (writes
+  the `[id, slot]` link; checks slot existence, input existence and TYPE match
+  against the schema when both ends are known; `--force` overrides a known
+  mismatch, never an unknown type; refuses combo inputs and self-wires).
+- Three new CLI commands: `workflow add-node CLASS_TYPE [--id N] [--title T]`,
+  `workflow wire FROM TO.INPUT [--slot N] [--force]`, `workflow remove-node
+  N`. All auto-save the session graph like `set`/`unset`, honour `--dry-run`,
+  and take `--json`.
+- 31 new unit tests in `test_core.py` (275 total, all passing): lowest-free-id
+  selection, defaults vs needs_wiring (combo first-choice, forceInput, absent
+  defaults, the control_after_generate phantom never emitted), id collision,
+  uninstalled types, title in `_meta`, wire clearing on removal (with
+  two-element values that do NOT name the node left alone), wire's slot/typo/
+  type-mismatch/combo/self-wire refusals and the unknown-schema pass-through,
+  the any-type (`*`) allowance, needs_wiring == validate's gaps, and CLI paths
+  for all three commands including dry-run, missing workflow, unknown node and
+  the add→wire→validate composition.
+- 4 new E2E subprocess tests in `test_full_e2e.py`
+  (`TestCLIGraphEditing`): a graph BUILT ENTIRELY through add-node + wire that
+  validates, renders, and downloads a PNG checked by magic bytes;
+  needs_wiring agreeing with the live schema's link inputs and with validate's
+  missing-required list on the real server; a type mismatch the CLI refuses
+  before the server queues it; and remove-node dropping its wires on a live
+  graph.
+- Version pins updated 0.17.0 → 0.18.0 in both test files.

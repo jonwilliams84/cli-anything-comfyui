@@ -45,6 +45,8 @@ cli-anything-comfyui --json workflow deps canvas.json      # can this even run h
 cli-anything-comfyui --json workflow convert canvas.json   # UI -> API, loads into session
 cli-anything-comfyui --json workflow info                  # does it have an output node?
 cli-anything-comfyui --json workflow set 3 seed 42
+cli-anything-comfyui --json workflow add-node SaveImage   # a new node, defaulted from the live schema
+cli-anything-comfyui --json workflow wire 1 2.images      # wire an output into NODE.INPUT
 cli-anything-comfyui --json run --download ./out
 ```
 
@@ -80,6 +82,13 @@ and the reason. Read it rather than retrying blind.
 worked" — the file is the baseline, the patched session graph is the current
 state. `workflow unset NODE INPUT` removes an override instead of guessing a
 replacement; `workflow export -o out.json` writes the patched graph to disk.
+
+**Adding and wiring nodes needs no canvas.** `workflow add-node CLASS_TYPE`
+defaults every widget input from the live `/object_info` and reports its
+link-type inputs as `needs_wiring`; `workflow wire FROM TO.INPUT` feeds them
+(and refuses a type mismatch instead of queueing a render that dies);
+`workflow remove-node N` drops the node and every wire into it. Build a graph
+entirely from the shell: add-node → wire → `workflow validate` → run.
 
 **`assets mask FILE ORIGINAL_REF`** uploads an inpainting mask tied to the
 image it belongs to. Without ORIGINAL_REF the server files the mask as a loose

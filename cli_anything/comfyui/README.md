@@ -39,6 +39,9 @@ cli-anything-comfyui workflow subgraphs my.json # what each subgraph definition 
 cli-anything-comfyui workflow convert my.json   # canvas -> runnable API graph (subgraphs expand)
 cli-anything-comfyui workflow outputs my-api.json  # which nodes in a graph write files
 cli-anything-comfyui workflow set 3 seed 42     # patch one input
+cli-anything-comfyui workflow add-node SaveImage  # a new node, defaulted from the live schema
+cli-anything-comfyui workflow wire 1 2.images   # wire an output into NODE.INPUT, types checked
+cli-anything-comfyui workflow remove-node 4     # drop a node — and every wire into it
 cli-anything-comfyui workflow unset 3 seed      # remove one input override
 cli-anything-comfyui workflow export -o p.json  # write the patched session graph to disk
 cli-anything-comfyui workflow diff my.json      # what changed since that file was converted
@@ -80,6 +83,21 @@ reported: 22 want rgthree, 5 want KJNodes' Get/SetNode, 2 want GGUF.
 gifs, videos, audio — because code that reads only `images` finds nothing for
 every video workflow. A graph with no output node is flagged before it wastes a
 render.
+
+**Building and repairing graphs without opening the canvas.** `workflow set`
+can only change inputs on nodes that already exist — until v0.18 the one thing
+this harness still needed the GUI for was adding a node to a graph. Now:
+`workflow add-node CLASS_TYPE` creates the node with every widget input
+(COMBO or scalar) defaulted from the LIVE `/object_info`, and reports what it
+could not default — the link-type inputs — as `needs_wiring`, which is exactly
+the list `workflow validate` reports as missing required inputs. `workflow
+wire FROM TO.INPUT` writes the `[id, slot]` link and checks, when both ends'
+schemas are known, that the slot exists, the input exists, and the types
+match — a MODEL wired into a CONDITIONING input queues clean and dies seconds
+into execution, and this catches it before the queue slot is spent. `workflow
+remove-node N` deletes the node AND every wire pointing at it, so what is left
+is a graph whose holes `validate` reports as missing inputs rather than wires
+into a node that no longer exists.
 
 **Batch variation of ONE graph.** `sweep` runs the same graph once per variant
 of a named input — the seed/width/prompt loop that used to mean a shell chain
