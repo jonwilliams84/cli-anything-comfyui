@@ -2,6 +2,70 @@
 
 All notable changes to this project are documented here.
 
+## [0.18.1] — 2026-09-26
+
+Maintenance release; no behaviour change.
+
+- The version pins inside the test suite (`test_the_cli_reports_its_version`
+  in `test_core.py` and `test_version` in `test_full_e2e.py`) still asserted
+  the previous release string, so every `--version` check failed the moment
+  the package was bumped and the release pipeline could not go green. They
+  now assert `0.18.1`, matching `setup.py` and the `__version__` in
+  `cli_anything/comfyui/__init__.py` and `comfyui_cli.py`, and the full gate
+  (pytest + coverage, ruff check, ruff format, bandit) passes again.
+- No new commands and no changes to existing commands; all v0.18.0 features
+  (`workflow add-node`, `workflow wire`, `workflow remove-node`) are
+  unchanged.
+
+## [0.18.0] — 2026-09-25
+
+Building and repairing graphs without the canvas. Until now the harness could
+only patch inputs on nodes that already existed — `workflow set`/`unset` — so
+the moment a graph needed a node ADDED (extend a render with a video combine,
+swap in a different sampler chain, repair a canvas whose loader died) the
+answer was "open the GUI". That was the last thing the CLI could not do that
+the software can. Three new commands close it, all operating on the loaded
+session graph, auto-saving, honouring `--dry-run`, and taking `--json`:
+
+- **`workflow add-node CLASS_TYPE [--id N] [--title T]`** — a new node whose
+  widget inputs (COMBO and scalar) are defaulted from the LIVE `/object_info`,
+  the same source the converter trusts for names and order, so the defaults
+  are the ones THIS server's pack versions declare. What cannot be defaulted
+  is never invented: link-type inputs, STRING widgets with `forceInput`, and
+  widgets the schema gives no default for come back in `needs_wiring` — which
+  is exactly the list `workflow validate` reports as missing required inputs,
+  so the gap is checkable, never silent. The `control_after_generate` phantom
+  is UI-only and never emitted. Node ids are the lowest free integer,
+  deterministic and collision-free against the string ids subgraph expansion
+  produces; `--id` picks one explicitly.
+- **`workflow wire FROM TO.INPUT [--slot N] [--force]`** — writes the link
+  value `[from_id, slot]` (e.g. `wire 4 9.model`), with the checks a bare
+  `workflow set` cannot make, against the server's own schema when both ends
+  are known: the slot must exist on the source, the input must exist on the
+  target (a typo is caught here, not by the server), and the types must match
+  — a MODEL wired into a CONDITIONING input queues clean and dies seconds into
+  execution, which is precisely the failure class the harness's pre-flight
+  exists to catch, now caught before the queue slot is spent. `--force`
+  overrides a KNOWN mismatch, never an unknown type; wiring into a combo input
+  is refused (set its value instead); a node cannot be wired to itself.
+- **`workflow remove-node N`** — deletes the node AND every wire pointing at
+  it, using the same link shape `validate` uses. Deleting a loader that feeds
+  four consumers without clearing their links leaves a graph that dies at the
+  server with 'wired to node N, which is not in the graph'; here the dangling
+  wires are cleared in the same step, and what remains is a graph whose holes
+  `validate` reports as missing inputs.
+- The three compose with everything downstream: `add-node` → `wire` →
+  `workflow validate` → `run --download` builds and renders a graph that never
+  existed as a canvas — pinned by an E2E test that does exactly that, download
+  checked by PNG magic bytes. Every pre-flight check (`deps`, `validate`,
+  `models`) treats the result like any other graph.
+- 31 new unit tests in `test_core.py` (275 total, all passing); 4 new E2E
+  subprocess tests in `test_full_e2e.py`. Version pins updated 0.17.0 →
+  0.18.0 in both test files.
+- Docs: README.md, cli_anything/comfyui/README.md, COMFYUI.md (a new SOP
+  section), tests/TEST.md, and the REPL help. `review` remains the only
+  "not built yet" item.
+
 ## [0.17.0] — 2026-09-17
 
 Subgraph expansion — the first "not built yet" item from 0.1.0, finally built.

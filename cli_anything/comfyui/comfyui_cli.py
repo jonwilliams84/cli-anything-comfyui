@@ -23,7 +23,7 @@ from cli_anything.comfyui.utils.comfyui_backend import (
     outputs_of,
 )
 
-__version__ = "0.17.0"
+__version__ = "0.18.1"
 _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 
@@ -644,6 +644,126 @@ def workflow_unset(ctx, node_id, name, json_):
         f"node {node_id}.{name} removed"
         + ("  (dry run — not saved)" if saved.get("dry_run") else ""),
     )
+
+
+@workflow.command("add-node")
+@click.argument("class_type")
+@click.option(
+    "--id", "node_id", default=None, help="Use this node id instead of the next free one."
+)
+@click.option("--title", default=None, help="A _meta.title for the new node.")
+@json_option
+@click.pass_context
+def workflow_add_node(ctx, class_type, node_id, title, json_):
+    """Add a node to the loaded graph, defaulted from the live schema. Auto-saves unless --dry-run.
+
+    Widget inputs (COMBO and scalar) take the defaults the server's own
+    /object_info declares; link-type inputs cannot be defaulted and are
+    reported as needs_wiring — feed each with `workflow wire`, then let
+    `workflow validate` confirm the node is complete.
+    """
+    _merge_json(ctx, json_)
+    st = _state(ctx)
+    api = st.get("workflow")
+    if not api:
+        die("no workflow loaded. Run: workflow convert <canvas.json>")
+    try:
+        res = wf.add_node(api, class_type, _object_info(ctx), node_id=node_id, title=title)
+    except (wf.WorkflowError, ComfyError) as exc:
+        die(str(exc))
+    saved = _autosave(ctx, st)
+    payload = dict(res)
+    payload["session"] = saved
+    lines = [f"added node {res['node']} ({class_type})"]
+    for name, val in res["inputs"].items():
+        lines.append(f"  {name} = {val!r}  (schema default)")
+    for name in res["needs_wiring"]:
+        lines.append(f"  {name} — needs wiring:  workflow wire <node> {res['node']}.{name}")
+    emit(ctx, payload, lines + (["  (dry run — not saved)"] if saved.get("dry_run") else []))
+
+
+@workflow.command("remove-node")
+@click.argument("node_id")
+@json_option
+@click.pass_context
+def workflow_remove_node(ctx, node_id, json_):
+    """Remove a node from the loaded graph — and every wire pointing at it.
+
+    The consumers' dangling links are cleared in the same step, so what is left
+    is a graph whose holes `workflow validate` reports as missing inputs, not
+    as wires into a node that no longer exists. Auto-saves unless --dry-run.
+    """
+    _merge_json(ctx, json_)
+    st = _state(ctx)
+    api = st.get("workflow")
+    if not api:
+        die("no workflow loaded. Run: workflow convert <canvas.json>")
+    try:
+        res = wf.remove_node(api, node_id)
+    except wf.WorkflowError as exc:
+        die(str(exc))
+    saved = _autosave(ctx, st)
+    payload = dict(res)
+    payload["session"] = saved
+    lines = [f"removed node {res['removed']} ({res['class_type']})"]
+    for w in res["wires_cleared"]:
+        lines.append(f"  cleared wire {w}")
+    emit(ctx, payload, lines + (["  (dry run — not saved)"] if saved.get("dry_run") else []))
+
+
+@workflow.command("wire")
+@click.argument("from_node")
+@click.argument("to")  # NODE.INPUT
+@click.option(
+    "--slot", default=0, show_default=True, type=int, help="Which output of FROM to wire."
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Wire even when the end types are known to disagree.",
+)
+@json_option
+@click.pass_context
+def workflow_wire(ctx, from_node, to, slot, force, json_):
+    """Wire FROM's output into TO.INPUT — e.g. `workflow wire 4 9.model`.
+
+    TO is NODE.INPUT. Both ends are checked against the server's own schema
+    when they are known: the slot must exist, the input must exist, and the
+    types must match — a MODEL wired into a CONDITIONING input queues clean
+    and dies seconds into execution. --force overrides a known mismatch, never
+    an unknown type. Auto-saves unless --dry-run.
+    """
+    _merge_json(ctx, json_)
+    if "." not in to:
+        die("wire needs TO as NODE.INPUT, e.g. 9.model")
+    to_node, input_name = to.split(".", 1)
+    st = _state(ctx)
+    api = st.get("workflow")
+    if not api:
+        die("no workflow loaded. Run: workflow convert <canvas.json>")
+    try:
+        res = wf.wire_input(
+            api,
+            from_node,
+            to_node,
+            input_name,
+            slot=slot,
+            object_info=_object_info(ctx),
+            force=force,
+        )
+    except (wf.WorkflowError, ComfyError) as exc:
+        die(str(exc))
+    saved = _autosave(ctx, st)
+    payload = dict(res)
+    payload["session"] = saved
+    lines = [
+        f"node {res['from']}[{res['slot']}] -> node {res['node']}.{res['input']}",
+        "  types checked: "
+        f"{res['from_type'] or '?'} -> {res['input_type'] or '?'}"
+        + ("  (forced)" if force else ""),
+    ]
+    emit(ctx, payload, lines + (["  (dry run — not saved)"] if saved.get("dry_run") else []))
 
 
 @workflow.command("export")
@@ -1673,7 +1793,7 @@ def repl(ctx):
         "status": "session + server state",
         "server": "status / features / embeddings / free / interrupt / logs",
         "nodes": "list / search / schema",
-        "workflow": "convert / deps / models / info / find / set / unset / validate / export / diff / subgraphs",
+        "workflow": "convert / deps / models / info / find / set / unset / add-node / remove-node / wire / validate / export / diff / subgraphs",
         "run": "queue the loaded graph and wait",
         "sweep": "run ONE graph many times, varying named inputs",
         "windows": "run several graphs, freeing VRAM between them",

@@ -858,6 +858,181 @@ def unset_input(api, node_id, name):
     return api
 
 
+#: Sentinel for a widget input the schema gives no default for — including a
+#: STRING widget with `forceInput`, which is declared a widget but is wired in
+#: practice. `None` is a legal default value, so it cannot double as the marker.
+_NO_DEFAULT = object()
+
+
+def _widget_default(spec):
+    """The value a fresh node carries for a widget input, or `_NO_DEFAULT`.
+
+    A COMBO takes its first choice; a scalar takes its schema `default`. A
+    widget with neither (`["INT"]`, or STRING with `forceInput`) has nothing to
+    take — the caller must wire it or set it, and pretending otherwise is how a
+    freshly built graph dies at the server.
+    """
+    if not isinstance(spec, (list, tuple)) or not spec:
+        return _NO_DEFAULT  # a bare link type ("MODEL") — never a widget value
+    if isinstance(spec[0], list):
+        return spec[0][0] if spec[0] else _NO_DEFAULT  # COMBO: first choice
+    opts = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+    if opts.get("forceInput"):
+        return _NO_DEFAULT  # declared STRING, wired like any link
+    default = opts.get("default")
+    return default if default is not None else _NO_DEFAULT
+
+
+def next_node_id(api):
+    """The lowest free integer node id, as a string.
+
+    Deterministic and collision-free against whatever the graph already holds —
+    including the string ids subgraph expansion produces (`2:e`), which are not
+    numeric and therefore never compete.
+    """
+    used = {int(n) for n in (api or {}) if str(n).isdigit()}
+    n = 1
+    while n in used:
+        n += 1
+    return str(n)
+
+
+def add_node(api, class_type, object_info, node_id=None, title=None):
+    """A new node, ready to wire: its widget inputs take the schema defaults.
+
+    Building or repairing a graph was the one thing this harness still needed
+    the canvas GUI for: `workflow set` can only change inputs on nodes that
+    exist. This adds the node, filling every widget (COMBO or scalar) with the
+    default the LIVE /object_info declares — the same source the converter
+    trusts for names and order.
+
+    Link-type inputs (and STRING widgets with `forceInput`) cannot be
+    defaulted — they arrive over a wire — so they come back as `needs_wiring`
+    and the node stays incomplete until `workflow wire` feeds each one. That is
+    honest, not lazy: an unset required input is exactly what `workflow
+    validate` reports, so the gap is checkable, never silent.
+    """
+    info = (object_info or {}).get(class_type)
+    if not info:
+        raise WorkflowError(f"node type {class_type!r} is not installed on this ComfyUI")
+    nid = str(node_id) if node_id is not None else next_node_id(api)
+    if nid in api:
+        raise WorkflowError(f"node id {nid} is already taken by {api[nid].get('class_type')}")
+    inputs = {}
+    needs_wiring = []
+    for name, spec in schema_inputs(object_info, class_type) or []:
+        default = _widget_default(spec)
+        if default is _NO_DEFAULT:
+            needs_wiring.append(name)
+        else:
+            inputs[name] = default
+    entry = {"class_type": class_type, "inputs": inputs}
+    if title:
+        entry["_meta"] = {"title": title}
+    api[nid] = entry
+    return {
+        "node": nid,
+        "class_type": class_type,
+        "inputs": inputs,
+        "needs_wiring": needs_wiring,
+    }
+
+
+def remove_node(api, node_id):
+    """Delete a node AND every wire that pointed at it.
+
+    Deleting a loader that feeds four consumers without clearing their links
+    leaves a graph that queues and dies with `validate`'s 'wired to node N,
+    which is not in the graph' — one render too late to be useful. The shape
+    that counts as a wire is the same one `validate` uses: a two-element list
+    whose first element names the node, so a widget that happens to be a
+    two-element list is left alone unless it really names this node.
+    """
+    nid = str(node_id)
+    if nid not in api:
+        raise WorkflowError(f"no node {nid} in this graph (have: {', '.join(sorted(api)[:12])}…)")
+    removed = api.pop(nid)
+    cleared = []
+    for other_id, entry in api.items():
+        inputs = entry.get("inputs") or {}
+        for name, val in list(inputs.items()):
+            if isinstance(val, list) and len(val) == 2 and str(val[0]) == nid:
+                del inputs[name]
+                cleared.append(f"{other_id}.{name}")
+    return {
+        "removed": nid,
+        "class_type": removed.get("class_type"),
+        "wires_cleared": sorted(cleared),
+    }
+
+
+def wire_input(api, from_node, to_node, input_name, slot=0, object_info=None, force=False):
+    """Wire one output of FROM into one input of TO.
+
+    A link is just an input value of the form `[from_id, slot]`, which `workflow
+    set` can also write by hand — but a bare set cannot check anything. This
+    checks, against the server's own schema when both ends are known: that the
+    slot exists on the source, that the target input exists at all (a typo is
+    caught here instead of by the server), and that the type at each end
+    matches. A MODEL wired into a CONDITIONING input queues clean and dies
+    seconds into execution — exactly the class of mistake the pre-flight exists
+    to catch. `--force` overrides a KNOWN mismatch, never an unknown type: when
+    either node's schema is not installed the wire goes through unchecked,
+    because guessing a type is how false alarms are made.
+    """
+    f, t = str(from_node), str(to_node)
+    for nid in (f, t):
+        if nid not in api:
+            raise WorkflowError(
+                f"no node {nid} in this graph (have: {', '.join(sorted(api)[:12])}…)"
+            )
+    if f == t:
+        raise WorkflowError(f"cannot wire node {t} to itself")
+    if slot < 0:
+        raise WorkflowError(f"slot must be >= 0 (got {slot})")
+    oi = object_info or {}
+    src_type = None
+    src_info = oi.get(api[f].get("class_type"))
+    if src_info is not None and isinstance(src_info.get("output"), list):
+        out_types = src_info["output"]
+        if slot >= len(out_types):
+            raise WorkflowError(
+                f"node {f} ({api[f].get('class_type')}) has {len(out_types)} output(s); "
+                f"slot {slot} does not exist"
+            )
+        src_type = out_types[slot]
+    dst_type = None
+    schema = schema_inputs(oi, api[t].get("class_type"))
+    if schema is not None:
+        spec = dict(schema).get(input_name)
+        if spec is None:
+            have = ", ".join(sorted(dict(schema)))
+            raise WorkflowError(f"node {t} has no input {input_name!r} (have: {have})")
+        if isinstance(spec[0], list):
+            if not force:
+                raise WorkflowError(
+                    f"input {input_name!r} on node {t} is a widget (combo); "
+                    "a wire cannot feed it — set its value with `workflow set` instead"
+                )
+        else:
+            dst_type = spec[0]
+    if not force and src_type and dst_type and src_type != dst_type:
+        if "*" not in (src_type, dst_type):
+            raise WorkflowError(
+                f"type mismatch: node {f} output {slot} is {src_type}, "
+                f"but node {t}.{input_name} wants {dst_type} (--force overrides)"
+            )
+    api[t].setdefault("inputs", {})[input_name] = [f, slot]
+    return {
+        "from": f,
+        "slot": slot,
+        "node": t,
+        "input": input_name,
+        "from_type": src_type,
+        "input_type": dst_type,
+    }
+
+
 def _node_sort_key(nid):
     return int(nid) if str(nid).isdigit() else 10**9
 
