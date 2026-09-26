@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [0.18.1] — 2026-09-26
+
+Maintenance release; no behaviour change.
+
+- The version pins inside the test suite (`test_the_cli_reports_its_version`
+  in `test_core.py` and `test_version` in `test_full_e2e.py`) still asserted
+  the previous release string, so every `--version` check failed the moment
+  the package was bumped and the release pipeline could not go green. They
+  now assert `0.18.1`, matching `setup.py` and the `__version__` in
+  `cli_anything/comfyui/__init__.py` and `comfyui_cli.py`, and the full gate
+  (pytest + coverage, ruff check, ruff format, bandit) passes again.
+- No new commands and no changes to existing commands; all v0.18.0 features
+  (`workflow add-node`, `workflow wire`, `workflow remove-node`) are
+  unchanged.
+
 ## [0.18.0] — 2026-09-25
 
 Building and repairing graphs without the canvas. Until now the harness could

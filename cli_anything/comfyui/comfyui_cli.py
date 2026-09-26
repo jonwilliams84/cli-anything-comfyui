@@ -23,7 +23,7 @@ from cli_anything.comfyui.utils.comfyui_backend import (
     outputs_of,
 )
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
 _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 

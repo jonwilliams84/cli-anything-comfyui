@@ -203,7 +203,7 @@ class TestCLISubprocess:
         assert "ComfyUI" in self._run(["--help"]).stdout
 
     def test_version(self):
-        assert "0.18.0" in self._run(["--version"]).stdout
+        assert "0.18.1" in self._run(["--version"]).stdout
 
     def test_server_status_json(self):
         d = json.loads(self._run(["--json", "server", "status"]).stdout)

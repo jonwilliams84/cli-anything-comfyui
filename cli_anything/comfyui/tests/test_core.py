@@ -1150,7 +1150,7 @@ def _seed_session(path, graph):
 
 
 def test_the_cli_reports_its_version():
-    assert "0.18.0" in runner.invoke(cl.cli, ["--version"]).output
+    assert "0.18.1" in runner.invoke(cl.cli, ["--version"]).output
 
 
 def test_traps_list_and_one_in_full():
